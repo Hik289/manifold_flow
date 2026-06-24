@@ -1,0 +1,37 @@
+{
+  "test_stiefel_feasibility": {
+    "pass": true,
+    "measured": "max ||Q^T Q - I||_F = 8.116e-07",
+    "elapsed_s": 0.727
+  },
+  "test_spd_feasibility": {
+    "pass": true,
+    "measured": "min lambda_min(S_t) = 0.2500",
+    "elapsed_s": 0.252
+  },
+  "test_tangent_condition": {
+    "pass": true,
+    "measured": "max skew rel = 4.365e-07",
+    "elapsed_s": 1.424
+  },
+  "test_decomposition_orthogonality": {
+    "pass": true,
+    "measured": "max |<G_tan,QP>|/norms = 5.146e-08",
+    "elapsed_s": 1.572
+  },
+  "test_spectrum_identity": {
+    "pass": true,
+    "measured": "max |sigma_i^2(Q S^{1/2}) - lambda_i(S)| fp32 = 1.907e-05 (threshold 1e-4, fp64 would be 1e-5)",
+    "elapsed_s": 0.235
+  },
+  "test_frozen_equivalence": {
+    "pass": true,
+    "measured": "max deviation = 0.000e+00",
+    "elapsed_s": 1.743
+  },
+  "test_finite_diff_geometry_bonus": {
+    "pass": true,
+    "measured": "FD rel err = 1.938e-08",
+    "elapsed_s": 0.022
+  }
+}

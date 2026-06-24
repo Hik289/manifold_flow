@@ -1,0 +1,75 @@
+{
+  "a6": {
+    "42": {
+      "seed": 42,
+      "method": "a6_random_pressure",
+      "best_ppl": 273.54,
+      "epoch_ppls": [
+        418.36,
+        350.78,
+        321.19,
+        304.55,
+        293.41,
+        285.11,
+        278.41,
+        273.54
+      ],
+      "elapsed": 189.93
+    },
+    "123": {
+      "seed": 123,
+      "method": "a6_random_pressure",
+      "best_ppl": 274.96,
+      "epoch_ppls": [
+        438.87,
+        365.54,
+        328.16,
+        308.92,
+        296.32,
+        287.18,
+        280.44,
+        274.96
+      ],
+      "elapsed": 192.11
+    },
+    "7": {
+      "seed": 7,
+      "method": "a6_random_pressure",
+      "best_ppl": 278.54,
+      "epoch_ppls": [
+        429.99,
+        359.24,
+        328.18,
+        310.67,
+        299.05,
+        290.48,
+        283.99,
+        278.54
+      ],
+      "elapsed": 194.34
+    }
+  },
+  "summary": {
+    "seeds_used": [
+      42,
+      123,
+      7
+    ],
+    "a6_ppls": [
+      273.54,
+      274.96,
+      278.54
+    ],
+    "mf_adam_ppls_matched": [
+      273.6116260829776,
+      276.1922541917133,
+      281.0335268554727
+    ],
+    "a6_mean": 275.68,
+    "a6_std": 2.1037743858757016,
+    "mf_adam_mean_matched": 276.9458023767212,
+    "mf_adam_std_matched": 3.0764729718231387,
+    "delta_a6_minus_mf": -1.265802376721183,
+    "verdict": "A6 \u2248 MF: mechanism is SPD preconditioning, not P_t direction"
+  }
+}
