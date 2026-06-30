@@ -5,7 +5,7 @@ build-backend = "setuptools.backends.legacy:build"
 [project]
 name = "manifoldflow"
 version = "0.1.0"
-description = "ManifoldFlow: Learnable SPD Geometry for Stiefel-Constrained Layers"
+description = "SPD-relaxed Stiefel layers with a learnable bounded singular spectrum"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
@@ -16,6 +16,11 @@ dependencies = [
   "torch>=2.0.0",
   "numpy>=1.24.0",
   "scipy>=1.11.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.4.0",
 ]
 
 [tool.setuptools.packages.find]

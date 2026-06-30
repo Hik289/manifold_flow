@@ -1,9 +1,4 @@
-"""ManifoldFlow core implementation.
-
-Public surface kept minimal at EXP_DESIGN stage; the optimizer classes are
-filled out in the RUNNING phase. Pure-function geometry helpers are already
-implemented because unit tests depend on them.
-"""
+"""Core geometry utilities for ManifoldFlow."""
 
 from .spd_ops import (
     sym,

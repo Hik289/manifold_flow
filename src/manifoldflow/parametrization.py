@@ -1,9 +1,4 @@
-"""W = Q @ S^{1/2} parametrization wrapper.
-
-At EXP_DESIGN stage we provide a plain functional interface; the
-``torch.nn.utils.parametrize`` integration is built on top of this in the
-RUNNING phase.
-"""
+"""Weight parametrizations for Stiefel and SPD-relaxed Stiefel layers."""
 
 from __future__ import annotations
 
@@ -27,8 +22,5 @@ def manifold_weight_cotiefel(Q: Tensor, S: Tensor) -> Tensor:
 
     The returned tensor has the original layer shape ``(n, r)``.
     """
-    Wt = Q @ matrix_sqrt(sym(S))   # (r, n) ... wait this is wrong, let's fix:
-    # If Q ∈ R^{r×n} with Q Q^T = I, S ∈ R^{n×n}, then we want W ∈ R^{n×r}.
-    # W^T = Q S^{1/2} would be (r×n)(n×n) = (r×n) — that's W^T with shape (r,n);
-    # transpose gives W with shape (n,r). Good.
+    Wt = Q @ matrix_sqrt(sym(S))
     return Wt.transpose(-1, -2)

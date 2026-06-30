@@ -1,15 +1,8 @@
 """ManifoldFlow optimizer.
 
-Implements Algorithm §2.8 from ManifoldFlow.md:
-  - Shared tangent-SGD code path with FixedStiefelOptimizer
-  - Online SPD geometry learning from rejected normal gradient
-  - Affine-invariant S update with spectral clipping
-  - gamma=0 / rho_geo=0 strictly reduces to FixedStiefelOptimizer trajectory
-
-DEVICE FIX (Batch 12 retry):
-  State tensors (S, M_P, Q_prev, V) are forcibly moved to Q.device at each step.
-  Matches Batch 8 "Option C" defensive fix. Prevents cuda:X vs cpu mismatch
-  regardless of how state tensors end up on the wrong device.
+The optimizer shares the Stiefel tangent step with the Fixed-Stiefel baseline
+and adds an affine-invariant SPD update for the learnable spectrum. Setting
+``rho_geo=0`` recovers the frozen-spectrum Fixed-Stiefel trajectory.
 """
 
 from __future__ import annotations

@@ -1,0 +1,53 @@
+# OS and editor files
+.DS_Store
+._*
+.idea/
+.vscode/
+*.swp
+*~
+
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Environments
+.venv/
+venv/
+env/
+.env
+
+# Datasets, model artifacts, and local caches
+datasets/
+data/raw/
+data/cifar10/
+data/cifar100/
+data/cora/
+data/citeseer/
+data/pubmed/
+hf_cache/
+.cache/
+
+# Experiment scratch outputs
+experiments/method_1/
+experiments/comparison/
+experiments/ablation/
+experiments/**/REPORT.md
+experiments/**/QUICK_VERDICT.md
+experiments/**/*.tmp
+wandb/
+runs/
+outputs/
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+
+# Logs
+*.log
+*.out
