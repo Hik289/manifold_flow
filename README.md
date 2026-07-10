@@ -1,6 +1,9 @@
 # ManifoldFlow: SPD-Relaxed Stiefel Layers with Learnable Singular Spectrum
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![arXiv](https://img.shields.io/badge/arXiv-2607.04535-b31b1b.svg)](https://arxiv.org/abs/2607.04535)
+[![Paper](https://img.shields.io/badge/Paper-PDF-blue.svg)](https://arxiv.org/pdf/2607.04535)
+[![Code](https://img.shields.io/badge/GitHub-Code-black.svg)](https://github.com/Hik289/manifold_flow)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c.svg)](requirements.txt)
 
@@ -189,11 +192,14 @@ The test suite checks:
 ## Citation
 
 ```bibtex
-@misc{manifoldflow2026,
-  title        = {ManifoldFlow: SPD-Relaxed Stiefel Layers with Learnable Singular Spectrum},
-  author       = {Anonymous},
-  year         = {2026},
-  howpublished = {\url{https://github.com/Hik289/manifold_flow}},
+@misc{yi2026manifoldflowspdrelaxedstiefellayers,
+  title         = {ManifoldFlow: SPD-Relaxed Stiefel Layers with Learnable Singular Spectrum},
+  author        = {Haiwen Yi and Xinyuan Song},
+  year          = {2026},
+  eprint        = {2607.04535},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.LG},
+  url           = {https://arxiv.org/abs/2607.04535}
 }
 ```
 
