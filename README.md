@@ -1,11 +1,8 @@
 # ManifoldFlow: SPD-Relaxed Stiefel Layers with Learnable Singular Spectrum
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![arXiv](https://img.shields.io/badge/arXiv-2607.04535-b31b1b.svg)](https://arxiv.org/abs/2607.04535)
-[![Paper](https://img.shields.io/badge/Paper-PDF-blue.svg)](https://arxiv.org/pdf/2607.04535)
-[![Code](https://img.shields.io/badge/GitHub-Code-black.svg)](https://github.com/Hik289/manifold_flow)
-[![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c.svg)](requirements.txt)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB.svg)](pyproject.toml)
 
 Official code for **ManifoldFlow**, a spectrum-learnable relaxation of
 Fixed-Stiefel neural layers.
