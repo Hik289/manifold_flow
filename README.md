@@ -15,6 +15,12 @@ Fixed-Stiefel neural layers.
   <img src="fig_method_update_detailed.png" width="96%" alt="Detailed ManifoldFlow update schematic">
 </p>
 
+## At a Glance
+
+- **Research question.** Can Stiefel-parameterized layers learn both orthogonal bases and bounded singular spectra?
+- **Core idea.** ManifoldFlow relaxes fixed Stiefel layers through an SPD factor with learnable singular values.
+- **What is included.** Installable package code, synthetic and dataset experiments, tests, scripts, and repository-scope notes.
+
 ## Method
 
 A Fixed-Stiefel layer represents a weight by a semi-orthogonal factor
@@ -35,7 +41,7 @@ for `Q`, and updates `S` with an affine-invariant SPD retraction. The default
 SPD direction is built from the normal-gradient pressure discarded by the
 Stiefel tangent projection.
 
-## What Is Included
+## Repository Scope
 
 - `src/manifoldflow/`: core geometry, Stiefel retractions, SPD operations,
   Fixed-Stiefel optimizer, ManifoldFlow optimizer, and spectral utilities.
@@ -155,7 +161,7 @@ The test suite checks:
 - `rho_geo = 0` matches the Fixed-Stiefel trajectory.
 - finite-difference geometry sanity checks.
 
-## Repository Layout
+## Repository Structure
 
 ```text
 .
