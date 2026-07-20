@@ -51,3 +51,10 @@ checkpoints/
 # Logs
 *.log
 *.out
+
+# Shared research-artifact hygiene
+.AppleDouble
+.env.*
+!.env.example
+logs/
+*.tmp
