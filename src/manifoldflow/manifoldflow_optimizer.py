@@ -9,17 +9,16 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Callable, Iterable, Literal, Optional
+from typing import Literal
 
 import torch
-from torch import Tensor
 from torch.optim import Optimizer
 
 from .spd_ops import sym, symlogm, affine_invariant_step, spectral_clip, fp32_eigh
 from .retraction import qr_retract, procrustes_align
 from .tangent import decompose_tangent_normal, project_tangent
 
-BaseOptim = Literal["sgd", "adam", "shampoo", "muon"]
+BaseOptim = Literal["sgd", "adam"]
 
 
 @dataclass
@@ -46,7 +45,7 @@ def _stiefel_sgd_step(Q, G_tan, state, lr, momentum):
         if V is None:
             V = torch.zeros_like(G_tan)
         else:
-            V = V.to(dev)  # DEVICE FIX: ensure V is on correct device
+            V = V.to(dev)
         D = momentum * V + G_tan
         D = project_tangent(Q, D)
         state["V"] = D
@@ -55,6 +54,37 @@ def _stiefel_sgd_step(Q, G_tan, state, lr, momentum):
     Q_new = qr_retract(Q, -lr * D)
     if momentum > 0.0 and "V" in state:
         state["V"] = project_tangent(Q_new, state["V"])
+    return Q_new
+
+
+def _stiefel_adam_step(Q, G_tan, state, lr, betas, eps=1e-8):
+    """Riemannian Adam step with tangent transport of the first moment."""
+    beta1, beta2 = betas
+    first_moment = state.get("adam_m")
+    second_moment = state.get("adam_v")
+    adam_step = state.get("adam_step", 0) + 1
+    if first_moment is None:
+        first_moment = torch.zeros_like(G_tan)
+        second_moment = torch.zeros_like(G_tan)
+    else:
+        first_moment = first_moment.to(Q.device)
+        second_moment = second_moment.to(Q.device)
+
+    first_moment = beta1 * first_moment + (1.0 - beta1) * G_tan
+    second_moment = beta2 * second_moment + (1.0 - beta2) * G_tan.square()
+    first_unbiased = first_moment / (1.0 - beta1**adam_step)
+    second_unbiased = second_moment / (1.0 - beta2**adam_step)
+    direction = project_tangent(
+        Q,
+        first_unbiased / (second_unbiased.clamp_min(0.0).sqrt() + eps),
+    )
+    Q_new = qr_retract(Q, -lr * direction)
+
+    # The first moment is tangent and must be transported. The elementwise
+    # second moment is a nonnegative scale estimate and must not be projected.
+    state["adam_m"] = project_tangent(Q_new, first_moment)
+    state["adam_v"] = second_moment
+    state["adam_step"] = adam_step
     return Q_new
 
 
@@ -79,6 +109,8 @@ class ManifoldFlowOptimizer(Optimizer):
     ):
         if mf_config is None:
             mf_config = ManifoldFlowConfig()
+        if base_optim not in {"sgd", "adam"}:
+            raise ValueError(f"unsupported base optimizer: {base_optim}")
         defaults = dict(lr=lr, momentum=momentum, betas=betas,
                         weight_decay=weight_decay, base_optim=base_optim)
         super().__init__(params, defaults)
@@ -105,13 +137,14 @@ class ManifoldFlowOptimizer(Optimizer):
         for group in self.param_groups:
             lr = group["lr"]
             momentum = group["momentum"]
+            base_optim = group["base_optim"]
             gamma_t = cfg.rho_geo * lr
 
             for Q in group["params"]:
                 if Q.grad is None:
                     continue
 
-                dev = Q.device  # canonical device for this step
+                dev = Q.device
                 G_bar = Q.grad.to(Q.dtype)
                 state = self.state[Q]
 
@@ -123,7 +156,6 @@ class ManifoldFlowOptimizer(Optimizer):
                     state["Q_prev"] = Q.clone()
 
                 t = state["step"]
-                # DEVICE FIX: force state tensors to Q.device at each step
                 S = state["S"].to(dev)
                 M_P = state["M_P"].to(dev)
                 Q_prev = state["Q_prev"].to(dev)
@@ -132,7 +164,16 @@ class ManifoldFlowOptimizer(Optimizer):
                 G_tan = split.G_tan
                 P_t = split.P
 
-                Q_new = _stiefel_sgd_step(Q, G_tan, state, lr, momentum)
+                if base_optim == "adam":
+                    Q_new = _stiefel_adam_step(
+                        Q,
+                        G_tan,
+                        state,
+                        lr,
+                        group["betas"],
+                    )
+                else:
+                    Q_new = _stiefel_sgd_step(Q, G_tan, state, lr, momentum)
 
                 if t > 0:
                     A = Q.T @ Q_prev

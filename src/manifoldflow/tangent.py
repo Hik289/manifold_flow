@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-import torch
 from torch import Tensor
 
 from .spd_ops import sym

@@ -10,13 +10,10 @@ This test exercises ``spd_ops.affine_invariant_step``, ``matrix_sqrt``, and
 
 import torch
 
-from manifoldflow.parametrization import manifold_weight
 from manifoldflow.spd_ops import (
     sym,
     matrix_sqrt,
-    matrix_sqrt_inv,
     symexpm,
-    fp32_eigh,
 )
 
 
