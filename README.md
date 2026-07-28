@@ -15,11 +15,15 @@ Fixed-Stiefel neural layers.
   <img src="fig_method_update_detailed.png" width="96%" alt="Detailed ManifoldFlow update schematic">
 </p>
 
-## Repository Summary
+## At A Glance
 
-- **Scope.** Can Stiefel-parameterized layers learn both orthogonal bases and bounded singular spectra?
-- **Method.** ManifoldFlow relaxes fixed Stiefel layers through an SPD factor with learnable singular values.
-- **Contents.** Installable package code, synthetic and dataset experiments, tests, scripts, and repository-scope notes.
+| Artifact review question | Entry point |
+| --- | --- |
+| Research question | Can Stiefel-parameterized layers learn both orthogonal bases and bounded singular spectra? |
+| Core method | ManifoldFlow relaxes fixed Stiefel layers through an SPD factor with learnable singular values. |
+| Included artifacts | Installable package code, synthetic and dataset experiments, tests, scripts, and repository-scope notes. |
+| Fast validation | `python -m pytest tests -q` |
+| Paper-scale reproduction | `bash scripts/reproduce_lstm.sh`, `bash scripts/reproduce_adult_mlp.sh`, and `bash scripts/reproduce_transformer.sh`. |
 
 ## Method
 
