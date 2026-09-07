@@ -103,10 +103,6 @@ class StiefelMLP(nn.Module):
         self.layers[layer_idx].update_sqrtS_cache(S)
 
 
-# ─── FIXED Riemannian Adam ────────────────────────────────────────────────
-# BUG FIX: Do NOT project v (second moment) onto new tangent space.
-# Tangent projection introduces negative entries in v → sqrt(v) = NaN → collapse.
-# v is used only as per-element scale → transport is unnecessary and harmful.
 class StiefelAdamState:
     def __init__(self):
         self.step = 0

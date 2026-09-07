@@ -393,10 +393,6 @@ class MFSGD(torch.optim.Optimizer):
                 warmup_done = t >= self._warmup_steps()
                 do_geo = (gamma_t > 0.0) and warmup_done and (t % cfg.K_geo == 0)
 
-                # EMA pressure update.
-                # Transport M_P only at geo_update steps (saves ~21 SVD/batch otherwise).
-                # Between geo steps, use straight EMA without Riemannian transport.
-                # Approximation error is small (Q changes little per step at typical lr).
                 if t > 0 and do_geo:
                     A = Q.T @ Q_prev
                     O_t = procrustes_align(A)
