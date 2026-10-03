@@ -1,5 +1,3 @@
-"""Unit test #4 — Decomposition orthogonality: <G_tan, Q P>_F ≈ 0."""
-
 import torch
 
 from manifoldflow.tangent import decompose_tangent_normal

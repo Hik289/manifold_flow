@@ -1,5 +1,3 @@
-"""Unit test #2 — SPD feasibility (λ_min(S_t) > 0)."""
-
 import torch
 
 from manifoldflow.spd_ops import sym, spectral_clip, affine_invariant_step, fp32_eigh
@@ -28,7 +26,7 @@ def test_random_affine_invariant_walks_stay_spd():
 
 
 def test_extreme_H_still_clipped():
-    """Even with huge H the post-clip eigenvalues must stay in [0.25, 4]."""
+
     torch.manual_seed(2)
     S = torch.eye(8, dtype=torch.float64)
     H = sym(10.0 * torch.randn(8, 8, dtype=torch.float64))

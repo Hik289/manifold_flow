@@ -1,4 +1,3 @@
-# OS and editor files
 .DS_Store
 ._*
 .idea/
@@ -6,7 +5,6 @@
 *.swp
 *~
 
-# Python caches and build artifacts
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -16,13 +14,11 @@ __pycache__/
 build/
 dist/
 
-# Environments
 .venv/
 venv/
 env/
 .env
 
-# Datasets, model artifacts, and local caches
 datasets/
 data/raw/
 data/cifar10/
@@ -33,7 +29,6 @@ data/pubmed/
 hf_cache/
 .cache/
 
-# Experiment scratch outputs
 experiments/method_1/
 experiments/comparison/
 experiments/ablation/
@@ -48,13 +43,14 @@ checkpoints/
 *.pt
 *.pth
 
-# Logs
 *.log
 *.out
 
-# Shared research-artifact hygiene
 .AppleDouble
 .env.*
 !.env.example
 logs/
 *.tmp
+experiments/results/**/partial*.json
+experiments/results/screen*/
+experiments/results/anchor*_results.json

@@ -1,9 +1,3 @@
-"""Unit test #6 - Frozen geometry equivalence.
-
-When rho_geo=0, ManifoldFlow-SGD trajectory must match Fixed-Stiefel-SGD
-step-for-step within <= 1e-6.
-"""
-
 import torch
 
 
@@ -19,7 +13,7 @@ def _quadratic_loss(Q, target):
 
 
 def test_frozen_equivalence_sgd():
-    """ManifoldFlowOptimizer(rho_geo=0) == FixedStiefelOptimizer step-for-step."""
+
     from manifoldflow.manifoldflow_optimizer import ManifoldFlowOptimizer, ManifoldFlowConfig
     from manifoldflow.fixed_stiefel import FixedStiefelOptimizer
 
@@ -31,7 +25,6 @@ def test_frozen_equivalence_sgd():
 
     target = torch.randn(n, r, dtype=torch.float32)
 
-    # Run A: Fixed-Stiefel-SGD
     Q_fs = _make_stiefel_q(n, r, seed)
     opt_fs = FixedStiefelOptimizer([Q_fs], lr=lr, momentum=0.0)
     Q_fs_history = []
@@ -42,7 +35,6 @@ def test_frozen_equivalence_sgd():
         opt_fs.step()
         Q_fs_history.append(Q_fs.data.clone())
 
-    # Run B: ManifoldFlow with rho_geo=0
     Q_mf = _make_stiefel_q(n, r, seed)
     cfg = ManifoldFlowConfig(rho_geo=0.0, warmup_frac=0.0)
     opt_mf = ManifoldFlowOptimizer([Q_mf], lr=lr, momentum=0.0, mf_config=cfg, total_steps=n_steps)
@@ -64,7 +56,7 @@ def test_frozen_equivalence_sgd():
 
 
 def test_frozen_equivalence_with_momentum():
-    """ManifoldFlowOptimizer(rho_geo=0, momentum=0.9) == FixedStiefelOptimizer(momentum=0.9)."""
+
     from manifoldflow.manifoldflow_optimizer import ManifoldFlowOptimizer, ManifoldFlowConfig
     from manifoldflow.fixed_stiefel import FixedStiefelOptimizer
 

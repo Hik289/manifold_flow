@@ -1,6 +1,4 @@
 #!/bin/bash
-# Reproduce Adult Census MLP results
-# Expected output in experiments/ (printed to stdout)
 
 set -e
 cd "$(dirname "$0")/.."

@@ -1,8 +1,3 @@
-"""Unit test #1 — Stiefel feasibility.
-
-‖Q^T Q − I‖_F < 1e-5 after random retractions.
-"""
-
 import torch
 
 from manifoldflow.retraction import qr_retract, polar_retract

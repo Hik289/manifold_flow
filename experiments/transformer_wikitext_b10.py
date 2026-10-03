@@ -1,18 +1,5 @@
 #!/usr/bin/env python3
-"""
-Batch 10 Stream β — Mini-Transformer FFN on WikiText-2
 
-Architecture: 2-block Transformer (d_model=128, n_head=4, n_layer=2)
-- FFN layers: StiefelLinear(128→256) + GELU + StiefelLinear(256→128)
-- Attention QKV: FREE (standard nn.Linear)
-- Embedding/Unembedding: FREE
-
-Metric: Perplexity (PPL) — lower is better.
-G3 paired diff: FS - MF (positive = MF is better).
-
-Outputs: method_1/mini_transformer_wikitext/{stage_b_results.json,
-          h1_pressure_persistence.json, g4_spectral_trace.json, REPORT.md}
-"""
 import sys, os, json, time, math, warnings, atexit, signal, traceback, re
 from pathlib import Path
 from collections import Counter
@@ -36,14 +23,13 @@ from manifoldflow.retraction import qr_retract, procrustes_align
 from manifoldflow.tangent import decompose_tangent_normal, project_tangent
 from manifoldflow.manifoldflow_optimizer import _stiefel_sgd_step, ManifoldFlowConfig
 
-# ─── Constants ────────────────────────────────────────────────────────────
 METHODS  = ['fs-sgd', 'fs-adam', 'mf-sgd', 'mf-adam']
 SEEDS    = [42, 123, 2024]
-N_EPOCHS_A = 5    # Stage A (quick tuning)
-N_EPOCHS_B = 12   # Stage B
+N_EPOCHS_A = 5
+N_EPOCHS_B = 12
 BATCH_SZ = 32
 SEQ_LEN  = 128
-VOCAB_SIZE_MAX = 10000  # top-K words
+VOCAB_SIZE_MAX = 10000
 D_MODEL  = 128
 N_HEAD   = 4
 N_LAYER  = 2
@@ -51,7 +37,6 @@ FFN_DIM  = 256
 LR_GRID  = [1e-3, 3e-3, 5e-3]
 RHO = 1e-2; LS = 1e-3; KG = 10
 
-# ─── Serializer ────────────────────────────────────────────────────────────
 def js(obj):
     if isinstance(obj, dict):           return {k: js(v) for k, v in obj.items()}
     if isinstance(obj, list):           return [js(v) for v in obj]
@@ -62,7 +47,6 @@ def js(obj):
     if obj is None:                     return None
     return obj
 
-# ─── QR init ─────────────────────────────────────────────────────────────
 def _qr_init(n, r, seed=None):
     g = torch.Generator()
     if seed is not None: g.manual_seed(seed)
@@ -70,7 +54,6 @@ def _qr_init(n, r, seed=None):
     Q, _ = torch.linalg.qr(A)
     return Q.float()
 
-# ─── StiefelLinear ────────────────────────────────────────────────────────
 class StiefelLinear(nn.Module):
     def __init__(self, in_dim, out_dim, seed=None, mode='fs'):
         super().__init__()
@@ -98,7 +81,6 @@ class StiefelLinear(nn.Module):
             self._sqrtS_cache = matrix_sqrt(sym(S)).detach().cpu()
 
 
-# ─── Riemannian Adam ─────────────────────────────────────────────────────
 class StiefelAdamState:
     def __init__(self):
         self.step = 0; self.m = None; self.v = None
@@ -120,12 +102,11 @@ def stiefel_adam_step(Q, G_tan, state_obj, lr, betas=(0.9, 0.999), eps=1e-8):
     return Q_new
 
 
-# ─── G3 paired test (PPL: lower is better → FS - MF, positive = MF better) ──
 def g3_paired_test_ppl(fs_results, mf_results):
-    """FS - MF: positive means MF has lower PPL (better)."""
+
     fs_ppls = [r['history'][-1]['test_ppl'] for r in fs_results]
     mf_ppls = [r['history'][-1]['test_ppl'] for r in mf_results]
-    diffs = [f - m for f, m in zip(fs_ppls, mf_ppls)]  # positive = MF better
+    diffs = [f - m for f, m in zip(fs_ppls, mf_ppls)]
     mean_d = float(np.mean(diffs))
     se_d   = float(np.std(diffs, ddof=1) / math.sqrt(len(diffs))) if len(diffs) > 1 else 0.0
     t_stat, p_2s = sp_stats.ttest_rel(fs_ppls, mf_ppls) if len(diffs) > 1 else (0.0, 1.0)
@@ -139,7 +120,6 @@ def g3_paired_test_ppl(fs_results, mf_results):
     }
 
 
-# ─── WikiText-2 data loading ──────────────────────────────────────────────
 def load_wikitext2(vocab_size=VOCAB_SIZE_MAX):
     print("[Data] Loading WikiText-2 via HuggingFace datasets...", flush=True)
     from datasets import load_dataset
@@ -154,7 +134,6 @@ def load_wikitext2(vocab_size=VOCAB_SIZE_MAX):
     val_text   = get_text('validation')
     test_text  = get_text('test')
 
-    # Build vocab: word-level, top vocab_size words
     words = re.findall(r'\w+|[^\w\s]', train_text.lower())
     counter = Counter(words)
     vocab_words = ['<pad>', '<unk>', '<eos>'] + [w for w, _ in counter.most_common(vocab_size - 3)]
@@ -178,9 +157,8 @@ def load_wikitext2(vocab_size=VOCAB_SIZE_MAX):
 
 
 def make_batch_loader(ids, seq_len, batch_sz):
-    """Create (inputs, targets) pairs from token id list."""
+
     ids_t = torch.tensor(ids, dtype=torch.long)
-    # Trim to multiple of seq_len * batch_sz
     n = len(ids_t) - 1
     n = (n // (seq_len * batch_sz)) * (seq_len * batch_sz)
     x = ids_t[:n].view(-1, seq_len)
@@ -189,7 +167,6 @@ def make_batch_loader(ids, seq_len, batch_sz):
     return DataLoader(ds, batch_sz, shuffle=True, drop_last=True)
 
 
-# ─── FFN block with Stiefel linear layers ────────────────────────────────
 class StiefelFFN(nn.Module):
     def __init__(self, d_model, ffn_dim, mode='fs', seed=0, block_idx=0):
         super().__init__()
@@ -212,7 +189,6 @@ class StiefelFFN(nn.Module):
         self.fc2.mode = mode
 
 
-# ─── Mini-Transformer Block ───────────────────────────────────────────────
 class MiniTransformerBlock(nn.Module):
     def __init__(self, d_model, n_head, ffn_dim, mode='fs', seed=0, block_idx=0):
         super().__init__()
@@ -242,13 +218,12 @@ class MiniTransformerBlock(nn.Module):
         self.ffn.set_mode(mode)
 
 
-# ─── Full Mini-Transformer ────────────────────────────────────────────────
 class MiniTransformer(nn.Module):
     def __init__(self, vocab_size, d_model=128, n_head=4, n_layer=2, ffn_dim=256,
                  mode='fs', seed=0):
         super().__init__()
         self.embed   = nn.Embedding(vocab_size, d_model)
-        self.pos_enc = nn.Embedding(512, d_model)   # positional embedding
+        self.pos_enc = nn.Embedding(512, d_model)
         self.blocks  = nn.ModuleList([
             MiniTransformerBlock(d_model, n_head, ffn_dim, mode=mode,
                                  seed=seed, block_idx=i)
@@ -263,7 +238,6 @@ class MiniTransformer(nn.Module):
         B, T = x.shape
         pos  = torch.arange(T, device=x.device).unsqueeze(0)
         h    = self.embed(x) + self.pos_enc(pos)
-        # Causal mask
         causal_mask = torch.triu(
             torch.full((T, T), float('-inf'), device=x.device), diagonal=1)
         for block in self.blocks:
@@ -300,7 +274,6 @@ class MiniTransformer(nn.Module):
             block.set_mode(mode)
 
 
-# ─── MF S state ──────────────────────────────────────────────────────────
 class MFSState:
     def __init__(self, r):
         self.S = torch.eye(r)
@@ -314,24 +287,22 @@ def mf_update_S(S, P_t, rho_geo, lambda_S, lambda_min, lambda_max, device):
     return S_new.cpu()
 
 
-# ─── Evaluate PPL ─────────────────────────────────────────────────────────
 @torch.no_grad()
 def evaluate_ppl(model, loader, device):
     model.eval()
     total_loss = 0.0; total_tokens = 0
     for x, y in loader:
         x, y = x.to(device), y.to(device)
-        logits = model(x)   # (B, T, V)
+        logits = model(x)
         B, T, V = logits.shape
         loss = F.cross_entropy(logits.view(B*T, V), y.view(B*T), reduction='sum')
         total_loss   += loss.item()
         total_tokens += B * T
     model.train()
     avg_loss = total_loss / total_tokens if total_tokens > 0 else float('inf')
-    return math.exp(min(avg_loss, 100.0))  # clamp for safety
+    return math.exp(min(avg_loss, 100.0))
 
 
-# ─── Train one method ─────────────────────────────────────────────────────
 def train_one(method, lr, seed, n_epochs, tr_ld, val_ld, te_ld, device, vocab_size,
               rho_geo=1e-2, lambda_S=1e-3, K_geo=10):
     mode_str = method.split('-')[0]
@@ -343,14 +314,12 @@ def train_one(method, lr, seed, n_epochs, tr_ld, val_ld, te_ld, device, vocab_si
     model = MiniTransformer(vocab_size, D_MODEL, N_HEAD, N_LAYER, FFN_DIM,
                             mode=mode_str, seed=seed).to(device)
 
-    # Free params → regular optimizer
     free_params = model.free_params()
     if base_opt == 'sgd':
         reg_opt = torch.optim.SGD(free_params, lr=lr, momentum=0.9, weight_decay=1e-4)
     else:
         reg_opt = torch.optim.Adam(free_params, lr=lr, weight_decay=1e-4)
 
-    # Stiefel states
     stiefel_q_states = {}
     stiefel_adam_st  = {}
     mf_S_states      = {}
@@ -379,17 +348,14 @@ def train_one(method, lr, seed, n_epochs, tr_ld, val_ld, te_ld, device, vocab_si
                 if p.grad is not None: p.grad.zero_()
 
             B, T = x.shape
-            logits = model(x)   # (B, T, V)
+            logits = model(x)
             loss = F.cross_entropy(logits.view(B*T, -1), y.view(B*T))
             loss.backward()
 
-            # Gradient clip for stability
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-            # ── Free param step ──
             reg_opt.step()
 
-            # ── Stiefel Q step ──
             fc_names  = model.stiefel_layer_names()
             fc_layers = model.stiefel_layers()
 
@@ -401,14 +367,12 @@ def train_one(method, lr, seed, n_epochs, tr_ld, val_ld, te_ld, device, vocab_si
                 G_tan = split.G_tan; P_t = split.P
                 qid = id(Q)
 
-                # H1 cos
                 if qid in _P_prev:
                     P_prev = _P_prev[qid]
                     cos_val = float(((P_t * P_prev).sum() / (P_t.norm() * P_prev.norm() + 1e-12)).item())
                     epoch_cos_P[nm].append(cos_val)
                 _P_prev[qid] = P_t.detach().clone()
 
-                # MF S update
                 if mode_str == 'mf' and _step_count >= warmup_steps and _step_count % K_geo == 0:
                     if qid not in mf_S_states:
                         mf_S_states[qid] = MFSState(layer.r)
@@ -418,7 +382,6 @@ def train_one(method, lr, seed, n_epochs, tr_ld, val_ld, te_ld, device, vocab_si
                         mf_cfg.lambda_min, mf_cfg.lambda_max, device)
                     layer.update_sqrtS_cache(S_state.S)
 
-                # MF effective gradient
                 if mode_str == 'mf' and qid in mf_S_states:
                     S = mf_S_states[qid].S.to(device, G_tan.dtype)
                     try:
@@ -430,7 +393,6 @@ def train_one(method, lr, seed, n_epochs, tr_ld, val_ld, te_ld, device, vocab_si
                 else:
                     G_tan_eff = G_tan
 
-                # Q update
                 if base_opt == 'sgd':
                     state = stiefel_q_states.setdefault(qid, {'step': 0})
                     Q_new = _stiefel_sgd_step(Q.detach().float(), G_tan_eff, state, lr, momentum=0.9)
@@ -441,7 +403,6 @@ def train_one(method, lr, seed, n_epochs, tr_ld, val_ld, te_ld, device, vocab_si
 
             epoch_loss += loss.item(); n_batches += 1
 
-        # ── End of epoch ──
         val_ppl  = evaluate_ppl(model, val_ld, device)
         test_ppl = evaluate_ppl(model, te_ld, device)
         avg_loss = epoch_loss / n_batches if n_batches > 0 else float('inf')
@@ -485,7 +446,6 @@ def train_one(method, lr, seed, n_epochs, tr_ld, val_ld, te_ld, device, vocab_si
                   f"loss={avg_loss:.3f} val_ppl={val_ppl:.1f} test_ppl={test_ppl:.1f} "
                   f"cos_P={[f'{v:.3f}' for v in cos_P_epoch.values()]}", flush=True)
 
-    # H1 stats: first 1/3
     cutoff = n_epochs // 3
     h1_stats = {}
     for nm in model.stiefel_layer_names():
@@ -500,7 +460,6 @@ def train_one(method, lr, seed, n_epochs, tr_ld, val_ld, te_ld, device, vocab_si
         else:
             h1_stats[nm] = {'mean': None, 'std': None, 'n': 0, 'all_means': []}
 
-    # Free GPU memory
     model.cpu()
     del model, reg_opt, stiefel_q_states, stiefel_adam_st, mf_S_states, _P_prev
     torch.cuda.empty_cache()
@@ -513,7 +472,6 @@ def train_one(method, lr, seed, n_epochs, tr_ld, val_ld, te_ld, device, vocab_si
     }
 
 
-# ─── Stage A: LR grid ─────────────────────────────────────────────────────
 def stage_a(tr_ld, val_ld, te_ld, device, vocab_size):
     print("\n=== Stage A: LR grid search ===", flush=True)
     best_lrs = {}
@@ -534,11 +492,9 @@ def stage_a(tr_ld, val_ld, te_ld, device, vocab_size):
     return best_lrs
 
 
-# ─── Main run ─────────────────────────────────────────────────────────────
 def run(out_dir, device):
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load data
     train_ids, val_ids, test_ids, vocab_size = load_wikitext2()
     tr_ld  = make_batch_loader(train_ids, SEQ_LEN, BATCH_SZ)
     val_ld = make_batch_loader(val_ids,   SEQ_LEN, BATCH_SZ)
@@ -548,13 +504,11 @@ def run(out_dir, device):
     print(f"Vocab={vocab_size} d_model={D_MODEL} n_head={N_HEAD} n_layer={N_LAYER} ffn_dim={FFN_DIM}", flush=True)
     print(f"GPU: {device}   Methods: {METHODS}   Seeds: {SEEDS}   Epochs-B: {N_EPOCHS_B}", flush=True)
 
-    # Stage A
     best_lrs = stage_a(tr_ld, val_ld, te_ld, device, vocab_size)
     print(f"\n[Stage A done] best_lrs={best_lrs}", flush=True)
     with open(out_dir / 'best_lrs.json', 'w') as f:
         json.dump(best_lrs, f, indent=2)
 
-    # Accumulators
     all_results = {m: [] for m in METHODS}
     stage_b = {
         'task': 'mini_transformer_wikitext', 'status': 'running',
@@ -576,7 +530,6 @@ def run(out_dir, device):
 
     atexit.register(flush_all)
 
-    # Stage B
     print("\n=== Stage B: 3 seeds × 4 methods ===", flush=True)
 
     for method in METHODS:
@@ -592,13 +545,11 @@ def run(out_dir, device):
                                rho_geo=RHO, lambda_S=LS, K_geo=KG)
             all_results[method].append(result)
 
-            # H1
             for nm, h1s in result['h1_stats'].items():
                 if nm not in h1_persist['methods'][method]:
                     h1_persist['methods'][method][nm] = []
                 h1_persist['methods'][method][nm].append({'seed': seed, **h1s})
 
-            # G4 (MF only)
             mode_str = method.split('-')[0]
             if mode_str == 'mf':
                 g4_trace['methods'][method].append({
@@ -625,7 +576,6 @@ def run(out_dir, device):
             })
             flush_all()
 
-    # G3 Analysis (PPL: FS - MF, positive = MF better)
     print("\n=== G3 Analysis (PPL) ===", flush=True)
     g3_results = {}
     for base_opt in ['sgd', 'adam']:
@@ -637,7 +587,6 @@ def run(out_dir, device):
                   f"t={g3['t_stat']:.2f} p={g3['p_val_1sided']:.3f} "
                   f"1SE={'YES' if g3['significant_1se'] else 'no'}", flush=True)
 
-    # H1 Summary
     h1_summary = {}
     for method in METHODS:
         h1_summary[method] = {}
@@ -661,7 +610,6 @@ def run(out_dir, device):
                 if m is not None: all_h1_mf_means.append(m)
     h1_max = max(all_h1_mf_means) if all_h1_mf_means else 0.0
 
-    # G4 Summary
     g4_summary = {}
     for method in ['mf-sgd', 'mf-adam']:
         if method not in g4_trace['methods']: continue
@@ -689,7 +637,6 @@ def run(out_dir, device):
         for nm, stats in method_stats.items():
             g4_max_ratio = max(g4_max_ratio, stats.get('lambda_ratio_mean', 0.0))
 
-    # Verdict
     g3_sgd  = g3_results.get('sgd',  {}).get('significant_1se', False)
     g3_adam = g3_results.get('adam', {}).get('significant_1se', False)
     h1_confirm = h1_max > 0.2
@@ -722,7 +669,6 @@ def run(out_dir, device):
     g4_trace['verdict'] = {'g4_max_ratio': float(g4_max_ratio), 'g4_confirm': g4_confirm}
     flush_all()
 
-    # REPORT.md
     lines = [
         "# Mini-Transformer WikiText-2 — Batch 10 Stream β Report\n\n",
         f"Generated: {time.strftime('%Y-%m-%d %H:%M UTC')}\n\n",
@@ -790,7 +736,6 @@ def run(out_dir, device):
     return verdict
 
 
-# ─── Entry ────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     def _sig(sig, frame):
         print(f"\n[SIGNAL {sig}] flushing...", flush=True); sys.exit(0)

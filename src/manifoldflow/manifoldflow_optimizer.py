@@ -1,10 +1,3 @@
-"""ManifoldFlow optimizer.
-
-The optimizer shares the Stiefel tangent step with the Fixed-Stiefel baseline
-and adds an affine-invariant SPD update for the learnable spectrum. Setting
-``rho_geo=0`` recovers the frozen-spectrum Fixed-Stiefel trajectory.
-"""
-
 from __future__ import annotations
 
 import math
@@ -23,7 +16,7 @@ BaseOptim = Literal["sgd", "adam"]
 
 @dataclass
 class ManifoldFlowConfig:
-    """Hyper-parameters for the ManifoldFlow geometry mechanism."""
+
     rho_geo: float = 1e-2
     beta_P: float = 0.95
     lambda_S: float = 1e-3
@@ -38,7 +31,7 @@ class ManifoldFlowConfig:
 
 
 def _stiefel_sgd_step(Q, G_tan, state, lr, momentum):
-    """Shared tangent-SGD retraction step. Used by both optimizers."""
+
     dev = Q.device
     if momentum > 0.0:
         V = state.get("V")
@@ -58,7 +51,7 @@ def _stiefel_sgd_step(Q, G_tan, state, lr, momentum):
 
 
 def _stiefel_adam_step(Q, G_tan, state, lr, betas, eps=1e-8):
-    """Riemannian Adam step with tangent transport of the first moment."""
+
     beta1, beta2 = betas
     first_moment = state.get("adam_m")
     second_moment = state.get("adam_v")
@@ -80,8 +73,6 @@ def _stiefel_adam_step(Q, G_tan, state, lr, betas, eps=1e-8):
     )
     Q_new = qr_retract(Q, -lr * direction)
 
-    # The first moment is tangent and must be transported. The elementwise
-    # second moment is a nonnegative scale estimate and must not be projected.
     state["adam_m"] = project_tangent(Q_new, first_moment)
     state["adam_v"] = second_moment
     state["adam_step"] = adam_step
@@ -89,11 +80,7 @@ def _stiefel_adam_step(Q, G_tan, state, lr, betas, eps=1e-8):
 
 
 class ManifoldFlowOptimizer(Optimizer):
-    """ManifoldFlow optimizer with online SPD geometry learning.
 
-    Each parameter must be a Q tensor (Stiefel factor). S is in optimizer state.
-    When rho_geo=0, trajectory is identical to FixedStiefelOptimizer (test #6).
-    """
 
     def __init__(
         self,

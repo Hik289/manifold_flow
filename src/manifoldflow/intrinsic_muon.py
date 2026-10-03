@@ -1,10 +1,3 @@
-"""Intrinsic Muon: Riemannian Muon on the Stiefel manifold (skeleton).
-
-Reference: arXiv:2605.09238 (2026). The tangent gradient is orthogonalised
-through Newton–Schulz iterations *before* retraction. No ``S_t`` is learned.
-Used as the head-to-head competitor for H0.lit_1 / H0.method_5.
-"""
-
 from __future__ import annotations
 
 from typing import Callable, Iterable, Optional
@@ -15,14 +8,7 @@ from torch.optim import Optimizer
 
 
 def newton_schulz_5(G: Tensor, steps: int = 5, eps: float = 1e-7) -> Tensor:
-    """5-iteration Newton–Schulz orthogonalisation of an n×r matrix.
 
-    Returns an approximation to the polar factor ``U`` from ``G = U Σ V^T``
-    (i.e., a matrix with all singular values ≈ 1). Pure function, used by
-    both Intrinsic Muon and ManifoldFlow-Muon.
-
-    Coefficients follow Keller Jordan's standard implementation.
-    """
     a, b, c = (3.4445, -4.7750, 2.0315)
     X = G.to(torch.float32)
     X = X / (X.norm() + eps)
@@ -38,11 +24,7 @@ def newton_schulz_5(G: Tensor, steps: int = 5, eps: float = 1e-7) -> Tensor:
 
 
 class IntrinsicMuonOptimizer(Optimizer):
-    """Stiefel-constrained Riemannian Muon (skeleton).
 
-    Step: tangent grad → NS5 orthogonalisation → tangent projection →
-    QR retraction. No ``S_t`` learning.
-    """
 
     def __init__(
         self,

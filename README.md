@@ -55,7 +55,7 @@ Stiefel tangent projection.
   SPD feasibility, tangent projection, spectrum identity, and frozen-spectrum
   equivalence.
 - `scripts/`: reproducibility entry points for the main experiment families.
-- `experiments/results/`: lightweight JSON records for archived runs.
+- `experiments/results/`: final five-seed results and completed ablation records.
 
 Raw datasets, model checkpoints, caches, notebooks, and local analysis scratch
 files are intentionally not bundled.
@@ -132,13 +132,10 @@ All scripts assume they are launched from the repository root. The shell
 wrappers set `PYTHONPATH=src` automatically.
 
 ```bash
-# LSTM / WikiText-2 hidden-to-vocabulary projection
 bash scripts/reproduce_lstm.sh
 
-# Adult Census MLP
 bash scripts/reproduce_adult_mlp.sh
 
-# Mini-Transformer feed-forward layers on WikiText-2
 bash scripts/reproduce_transformer.sh
 ```
 
@@ -204,7 +201,7 @@ Reproduction notes are in [docs/ARTIFACT.md](docs/ARTIFACT.md): environment file
 
 - **Release.** Source code, configuration files, and runnable entry points are tracked here.
 - **Runs.** Start with the smoke or quick-start commands before full grids; record commit hash, Python version, model/backend identifiers, seeds, and command-line arguments.
-- **Data.** Large datasets, benchmark downloads, generated outputs, and API keys are not tracked. Use the data/configuration notes above to recreate or point to local copies.
+- **Data.** Large datasets, benchmark downloads, intermediate outputs, and API keys are not tracked. Selected final experiment records are retained in `experiments/results/`. Use the data/configuration notes above to recreate or point to local copies.
 - **Reporting.** Keep raw run folders fixed for paper-scale runs and regenerate tables or figures from logged artifacts with the listed scripts.
 
 ## Citation

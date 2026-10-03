@@ -1,5 +1,3 @@
-"""Core geometry utilities for ManifoldFlow."""
-
 from .spd_ops import (
     sym,
     fp32_eigh,

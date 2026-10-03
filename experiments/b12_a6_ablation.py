@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-Batch 12 Task 2 — A6 Random Pressure Ablation on LSTM/WikiText-2
-3 seeds (42, 123, 7), GPU 1 only
-Compare A6 (random P_t) vs MF-Adam (already done in Task 1)
-"""
+
 import sys, os, json, time, math, warnings, atexit, signal, traceback
 from pathlib import Path
 from collections import Counter
@@ -18,7 +14,6 @@ sys.path.insert(0, str(SRC))
 OUT_DIR  = Path("./experiments/ablation/a6_random_pressure/lstm_wt2")
 HF_CACHE = "./datasets/hf_cache"
 
-# Match Task 1 hypers exactly
 SEEDS     = [42, 123, 7]
 N_EPOCHS  = 8
 BATCH_SZ  = 32
@@ -67,7 +62,6 @@ def _qr_init(n, r, seed=None):
     Q, _ = torch.linalg.qr(A)
     return Q.float()
 
-# ─── Load data ───────────────────────────────────────────────────────────────
 def load_data():
     from datasets import load_dataset
     ds = load_dataset("wikitext", "wikitext-2-raw-v1", cache_dir=HF_CACHE)
@@ -95,9 +89,8 @@ def get_batch(source, i):
     sl = min(SEQ_LEN, len(source) - 1 - i)
     return source[i:i+sl], source[i+1:i+1+sl].reshape(-1)
 
-# ─── A6 optimizer with random pressure ───────────────────────────────────────
 def build_a6_optimizer(model, lr, total_steps):
-    """Build optimizer that replaces P_t with random symmetric matrix of equal norm."""
+
     import types
     from manifoldflow.manifoldflow_optimizer import ManifoldFlowConfig, ManifoldFlowOptimizer
     from manifoldflow.spd_ops import sym, symlogm, affine_invariant_step, spectral_clip, fp32_eigh
@@ -146,7 +139,6 @@ def build_a6_optimizer(model, lr, total_steps):
                 P_t_real = split.P
                 P_norm_real = P_t_real.norm() + eps
 
-                # A6: replace P_t with random symmetric matrix of equal norm
                 r_size = P_t_real.shape[0]
                 R = torch.randn(r_size, r_size, device=Q.device, dtype=Q.dtype)
                 R_sym = sym(R)
@@ -202,7 +194,6 @@ def build_a6_optimizer(model, lr, total_steps):
     opt_mf.step = types.MethodType(_a6_step, opt_mf)
     return opt_mf, opt_base
 
-# ─── Model ───────────────────────────────────────────────────────────────────
 def make_lstm_model(vocab_size, seed):
     import torch.nn as nn, torch.nn.functional as F
     from manifoldflow.spd_ops import matrix_sqrt, sym
@@ -212,7 +203,6 @@ def make_lstm_model(vocab_size, seed):
             super().__init__()
             self.embed = nn.Embedding(vocab_size, EMBED_DIM)
             self.lstm  = nn.LSTM(EMBED_DIM, HIDDEN_DIM, num_layers=1, batch_first=False)
-            # Projection: hidden→vocab (out>in → n=vocab, r=hidden, no transpose)
             self.proj_Q    = nn.Parameter(_qr_init(vocab_size, HIDDEN_DIM, seed))
             self._sqrtS    = torch.eye(HIDDEN_DIM, device=DEVICE)
             self.proj_bias = nn.Parameter(torch.zeros(vocab_size, device=DEVICE))
@@ -221,7 +211,6 @@ def make_lstm_model(vocab_size, seed):
         def forward(self, x, hidden=None):
             emb = self.embed(x)
             out, hidden = self.lstm(emb, hidden)
-            # W = proj_Q @ sqrtS (no transpose since vocab>hidden)
             sqrtS = self._sqrtS.to(self.proj_Q.device, self.proj_Q.dtype)
             W = self.proj_Q @ sqrtS
             logits = F.linear(out.view(-1, out.size(-1)), W, self.proj_bias)
@@ -247,7 +236,6 @@ def eval_ppl(model, val_data):
             total_tokens += y.numel()
     return math.exp(total_loss / total_tokens)
 
-# ─── Run A6 for one seed ──────────────────────────────────────────────────────
 def run_a6_seed(seed, train_data, val_data, vocab_size):
     import torch.nn.functional as F
     set_seed(seed)
@@ -273,7 +261,6 @@ def run_a6_seed(seed, train_data, val_data, vocab_size):
             torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             opt_mf.step()
             if opt_base: opt_base.step()
-            # Update sqrtS from optimizer state
             Q = model.proj_Q
             if Q in opt_mf.state and 'S' in opt_mf.state[Q]:
                 model.update_sqrtS(opt_mf.state[Q]['S'])
@@ -285,7 +272,6 @@ def run_a6_seed(seed, train_data, val_data, vocab_size):
         print(f"  [A6 seed={seed}] ep{epoch+1}/{N_EPOCHS} ppl={ppl:.2f}")
 
     elapsed = time.time() - t0
-    # Free memory
     del model, opt_mf, opt_base
     torch.cuda.empty_cache()
     import gc; gc.collect()
@@ -298,13 +284,11 @@ def run_a6_seed(seed, train_data, val_data, vocab_size):
         "elapsed":    elapsed,
     }
 
-# ─── Main ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print(f"A6 Ablation — GPU: {DEVICE}")
     print(f"Seeds: {SEEDS}")
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Load existing results if any
     results_path = OUT_DIR / "results.json"
     if results_path.exists():
         try:
@@ -314,7 +298,6 @@ if __name__ == "__main__":
     else:
         existing = {}
 
-    # A6 results dict
     a6_results = existing.get("a6", {})
     _atexit_data = {"a6": a6_results}
 
@@ -348,16 +331,13 @@ if __name__ == "__main__":
             _atexit_data["a6"] = a6_results
             flush_json(results_path, _atexit_data)
 
-    # Compute summary
     a6_ppls  = [v["best_ppl"] for v in a6_results.values() if isinstance(v,dict) and "best_ppl" in v]
 
-    # Load MF-Adam results from Task 1 for comparison
     task1_path = Path("./experiments/method_1/lstm_wt2_proj/partial_adam.json")
     mf_ppls = []
     if task1_path.exists():
         t1 = json.load(open(task1_path))
         mf_cell = t1.get("MF-ADAM", {})
-        # Use same seeds as A6
         for seed in SEEDS:
             v = mf_cell.get(str(seed), {})
             if isinstance(v, dict) and "best_ppl" in v:

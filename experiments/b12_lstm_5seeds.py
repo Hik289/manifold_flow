@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""
-Batch 12 — LSTM/WikiText-2 hidden→vocab projection 5-seed confirm
-4 cells: FS-SGD, FS-Adam, MF-SGD, MF-Adam
-5 seeds: 42 (reuse), 123, 7, 2024, 2025 (4 new)
-GPU 1 = SGD cells, GPU 2 = Adam cells (parallel via subprocess)
-Mechanism trace per epoch: ‖P_t‖_F, cos(P_t, P_{t-1}), λ_max/λ_min(S_t)
-Output: experiments/method_1/lstm_wt2_proj/
-Task 2 (A6 random pressure): ablation/a6_random_pressure/lstm_wt2/
-"""
+
 import sys, os, json, time, math, warnings, atexit, signal, traceback, argparse, subprocess
 from pathlib import Path
 from collections import Counter
@@ -30,15 +22,12 @@ SEQ_LEN   = 35
 EMBED_DIM = 128
 HIDDEN_DIM = 128
 VOCAB_SIZE_TARGET = 10000
-# MF hyper
 RHO_GEO   = 0.01
 LAMBDA_S  = 0.001
 K_GEO     = 10
-# LR
 LR_ADAM   = 0.003
 LR_SGD    = 0.01
 
-# ─── Serializer ─────────────────────────────────────────────────────────────
 def js(obj):
     if isinstance(obj, dict):           return {k: js(v) for k, v in obj.items()}
     if isinstance(obj, list):           return [js(v) for v in obj]
@@ -69,7 +58,6 @@ def set_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-# ─── QR init ────────────────────────────────────────────────────────────────
 def _qr_init(n, r, seed=None):
     import torch
     g = torch.Generator()
@@ -78,9 +66,8 @@ def _qr_init(n, r, seed=None):
     Q, _ = torch.linalg.qr(A)
     return Q.float()
 
-# ─── StiefelLinear ───────────────────────────────────────────────────────────
 def build_stiefel_linear(in_dim, out_dim, seed, mode, device):
-    """Returns (module, Q_param)"""
+
     import torch, torch.nn as nn, torch.nn.functional as F
     from manifoldflow.spd_ops import matrix_sqrt, sym
 
@@ -112,7 +99,6 @@ def build_stiefel_linear(in_dim, out_dim, seed, mode, device):
                 self._sqrtS_cache = matrix_sqrt(sym(S)).detach()
     return StiefelLinear()
 
-# ─── LSTM Model ─────────────────────────────────────────────────────────────
 def make_lstm_model(vocab_size, embed_dim, hidden_dim, mode, seed, device):
     import torch, torch.nn as nn, torch.nn.functional as F
     from manifoldflow.spd_ops import matrix_sqrt, sym
@@ -123,12 +109,9 @@ def make_lstm_model(vocab_size, embed_dim, hidden_dim, mode, seed, device):
             self.mode = mode
             self.embed = nn.Embedding(vocab_size, embed_dim)
             self.lstm  = nn.LSTM(embed_dim, hidden_dim, num_layers=1, batch_first=False)
-            # Stiefel only on hidden→vocab projection
-            # F.linear needs W of shape (out, in) = (vocab_size, hidden_dim)
-            # Q must be tall (rows >= cols); no transpose needed when vocab>hidden
-            if vocab_size <= hidden_dim:  # out <= in → Q=(hidden_dim, vocab_size), W=Q.T
+            if vocab_size <= hidden_dim:
                 n, r = hidden_dim, vocab_size; self.proj_transpose = True
-            else:                          # out > in → Q=(vocab_size, hidden_dim), W=Q
+            else:
                 n, r = vocab_size, hidden_dim; self.proj_transpose = False
             self.proj_Q    = nn.Parameter(_qr_init(n, r, seed))
             self._sqrtS    = torch.eye(r, device=device)
@@ -157,7 +140,6 @@ def make_lstm_model(vocab_size, embed_dim, hidden_dim, mode, seed, device):
     m = LSTMLMModel().to(device)
     return m
 
-# ─── Optimizer builders ─────────────────────────────────────────────────────
 def build_optimizer(model, optim_type, mode, lr, total_steps, device):
     from manifoldflow.manifoldflow_optimizer import ManifoldFlowConfig, ManifoldFlowOptimizer
 
@@ -173,17 +155,16 @@ def build_optimizer(model, optim_type, mode, lr, total_steps, device):
         opt_mf = ManifoldFlowOptimizer(stiefel_params, base_optim='adam', lr=lr,
                                         betas=(0.9,0.999), mf_config=cfg, total_steps=total_steps)
         opt_base = __import__('torch').optim.Adam(other_params, lr=lr) if other_params else None
-    else:  # sgd
+    else:
         opt_mf = ManifoldFlowOptimizer(stiefel_params, base_optim='sgd', lr=lr,
                                         momentum=0.9, mf_config=cfg, total_steps=total_steps)
         opt_base = __import__('torch').optim.SGD(other_params, lr=lr, momentum=0.9) if other_params else None
     return opt_mf, opt_base
 
-# ─── Data loading ────────────────────────────────────────────────────────────
 _DATASET_CACHE = {}
 
 def load_wt2_data(device):
-    """Load WikiText-2, return (train_data, val_data, vocab_size, w2i)"""
+
     import torch
     if 'wt2' in _DATASET_CACHE:
         return _DATASET_CACHE['wt2']
@@ -235,12 +216,8 @@ def eval_ppl(model, val_data):
             total_tokens += y.numel()
     return math.exp(total_loss / total_tokens)
 
-# ─── Mechanism trace helpers ──────────────────────────────────────────────────
 def get_trace_from_opt(model, opt_mf, prev_mp=None):
-    """
-    Extract per-epoch mechanism trace for the projection layer.
-    Returns (trace_dict, current_M_P_for_next_epoch)
-    """
+
     import torch
     Q = model.proj_Q
     state = opt_mf.state.get(Q, {})
@@ -250,13 +227,12 @@ def get_trace_from_opt(model, opt_mf, prev_mp=None):
     lam_min = plog.get("lambda_min", float('nan'))
     lam_max = plog.get("lambda_max", float('nan'))
 
-    # cos(P_t, P_{t-1}): approximate via M_P EMA direction
     M_P_curr = state.get("M_P", None)
     cos_val  = float('nan')
     if M_P_curr is not None and prev_mp is not None:
         with torch.no_grad():
             a = M_P_curr.float().flatten()
-            b = prev_mp.to(a.device).float().flatten()  # ensure same device
+            b = prev_mp.to(a.device).float().flatten()
             denom = a.norm() * b.norm()
             if denom > 1e-10:
                 cos_val = (a @ b / denom).item()
@@ -270,13 +246,9 @@ def get_trace_from_opt(model, opt_mf, prev_mp=None):
     }
     return trace, curr_mp
 
-# ─── Single cell run ─────────────────────────────────────────────────────────
 def run_cell(optim_type, mode, seed, device, train_data, val_data, vocab_size,
              a6_random_pressure=False):
-    """
-    Run one (optim_type, mode, seed) combination.
-    Returns result dict with PPL curve + mechanism trace.
-    """
+
     import torch, torch.nn.functional as F
 
     cell_name = f"{'MF' if mode=='mf' else 'FS'}-{optim_type.upper()}"
@@ -292,7 +264,6 @@ def run_cell(optim_type, mode, seed, device, train_data, val_data, vocab_size,
     model = make_lstm_model(vocab_size, EMBED_DIM, HIDDEN_DIM, mode, seed, device)
     opt_mf, opt_base = build_optimizer(model, optim_type, mode, lr, total_steps, device)
 
-    # For A6 random pressure: monkey-patch opt_mf.step to replace P_t with random
     if a6_random_pressure and mode == 'mf':
         _orig_step = opt_mf.step.__func__
         import types
@@ -302,7 +273,7 @@ def run_cell(optim_type, mode, seed, device, train_data, val_data, vocab_size,
         from manifoldflow.spd_ops import symlogm, affine_invariant_step, spectral_clip, fp32_eigh
 
         def _a6_step(self, closure=None):
-            """Same as MF step but replace P_t with random symmetric matrix of equal norm."""
+
             loss = None
             if closure is not None:
                 with torch.enable_grad():
@@ -332,7 +303,6 @@ def run_cell(optim_type, mode, seed, device, train_data, val_data, vocab_size,
                     P_t_real = split.P
                     P_norm_real = P_t_real.norm() + eps
 
-                    # A6: replace P_t with random symmetric matrix of equal norm
                     r_size = P_t_real.shape[0]
                     R = torch.randn(r_size, r_size, device=Q.device, dtype=Q.dtype)
                     R_sym = sym(R)
@@ -379,7 +349,7 @@ def run_cell(optim_type, mode, seed, device, train_data, val_data, vocab_size,
                     if self.log_pressure:
                         eigvals, _ = fp32_eigh(state["S"])
                         self._pressure_log[id(Q)] = {
-                            "P_norm": P_t_real.norm().item(),  # real P_norm for trace
+                            "P_norm": P_t_real.norm().item(),
                             "grad_tan_norm": G_tan.norm().item(),
                             "lambda_min": eigvals.min().item(),
                             "lambda_max": eigvals.max().item(),
@@ -419,7 +389,6 @@ def run_cell(optim_type, mode, seed, device, train_data, val_data, vocab_size,
         if ppl < best_ppl:
             best_ppl = ppl
 
-        # Mechanism trace
         if mode == 'mf':
             trace, prev_mp = get_trace_from_opt(model, opt_mf, prev_mp)
             mechanism_trace.append(trace)
@@ -440,22 +409,19 @@ def run_cell(optim_type, mode, seed, device, train_data, val_data, vocab_size,
         result["mechanism_trace"] = mechanism_trace
     return result
 
-# ─── Worker process ──────────────────────────────────────────────────────────
 def worker_main(optim_type, gpu_idx):
-    """Run all seeds for a given optim_type on a specific GPU."""
+
     import torch
     device = torch.device(f"cuda:{gpu_idx}")
     print(f"\n{'='*60}")
     print(f"WORKER: optim={optim_type.upper()}, GPU={gpu_idx}")
     print(f"{'='*60}")
 
-    # Load data once
     train_data, val_data, vocab_size, w2i = load_wt2_data(device)
 
     out_dir = OUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load existing partial results to resume from where we left off
     partial_path = out_dir / f"partial_{optim_type}.json"
     if partial_path.exists():
         try:
@@ -479,7 +445,6 @@ def worker_main(optim_type, gpu_idx):
         if cell_key not in worker_results:
             worker_results[cell_key] = {}
         for seed in SEEDS:
-            # Skip if already done
             existing = worker_results.get(cell_key, {}).get(str(seed), {})
             if isinstance(existing, dict) and "best_ppl" in existing:
                 print(f"  [{cell_key} seed={seed}] SKIP (already done PPL={existing['best_ppl']:.2f})")
@@ -500,9 +465,8 @@ def worker_main(optim_type, gpu_idx):
     flush_json(partial_path, worker_results)
     print(f"\n[WORKER {optim_type}] Done. Results: {partial_path}")
 
-# ─── Task 2: A6 ablation ─────────────────────────────────────────────────────
 def run_a6_ablation():
-    """A6 random pressure control: 3 seeds, GPU 2, MF-Adam only."""
+
     import torch
     device = torch.device("cuda:2")
     print(f"\n{'='*60}")
@@ -523,7 +487,6 @@ def run_a6_ablation():
     atexit.register(_atexit_abl)
 
     for seed in seeds_a6:
-        # MF-Adam baseline
         try:
             res_mf = run_cell('adam', 'mf', seed, device, train_data, val_data, vocab_size,
                                a6_random_pressure=False)
@@ -535,7 +498,6 @@ def run_a6_ablation():
             print(f"  [MF-Adam seed={seed}] FAILED: {e}")
             mfa_results[str(seed)] = {"status":"failed","error":str(e)}
 
-        # A6 random pressure
         try:
             res_a6 = run_cell('adam', 'mf', seed, device, train_data, val_data, vocab_size,
                                a6_random_pressure=True)
@@ -547,7 +509,6 @@ def run_a6_ablation():
             print(f"  [A6-random seed={seed}] FAILED: {e}")
             a6_results[str(seed)] = {"status":"failed","error":str(e)}
 
-    # Compute summary
     mf_ppls = [v["best_ppl"] for v in mfa_results.values() if "best_ppl" in v]
     a6_ppls = [v["best_ppl"] for v in a6_results.values()  if "best_ppl" in v]
     summary = {
@@ -564,14 +525,12 @@ def run_a6_ablation():
     print(f"              Δ(A6-MF)={summary['delta_mf_vs_a6']:+.2f} PPL (positive = A6 worse = mechanism exists)")
     return final
 
-# ─── Aggregate + report ──────────────────────────────────────────────────────
 def aggregate_and_report(sgd_path, adam_path):
-    """Merge partial results, compute mean±std, write final JSON + REPORT.md"""
+
     sgd_res  = json.load(open(sgd_path))  if sgd_path.exists()  else {}
     adam_res = json.load(open(adam_path)) if adam_path.exists() else {}
     all_cells = {**sgd_res, **adam_res}
 
-    # Cells expected: FS-SGD, MF-SGD, FS-ADAM, MF-ADAM
     summary = {}
     for cell, seed_dict in all_cells.items():
         ppls = [v["best_ppl"] for v in seed_dict.values() if isinstance(v, dict) and "best_ppl" in v]
@@ -585,7 +544,6 @@ def aggregate_and_report(sgd_path, adam_path):
             "ppls": ppls,
         }
 
-    # Mechanism trace summary (MF cells only)
     mf_trace_summary = {}
     for cell_key in ["MF-ADAM", "MF-SGD"]:
         cell = all_cells.get(cell_key, {})
@@ -605,14 +563,13 @@ def aggregate_and_report(sgd_path, adam_path):
                 "lambda_max_range": [float(np.min(lam_maxs)), float(np.max(lam_maxs))] if lam_maxs else None,
             }
 
-    # Delta MF-FS for each optim
     delta_adam = delta_sgd = None
     fs_adam = summary.get("FS-ADAM", {}).get("mean")
     mf_adam = summary.get("MF-ADAM", {}).get("mean")
     fs_sgd  = summary.get("FS-SGD",  {}).get("mean")
     mf_sgd  = summary.get("MF-SGD",  {}).get("mean")
     if fs_adam is not None and mf_adam is not None:
-        delta_adam = fs_adam - mf_adam  # positive = MF better (lower PPL)
+        delta_adam = fs_adam - mf_adam
     if fs_sgd is not None and mf_sgd is not None:
         delta_sgd = fs_sgd - mf_sgd
 
@@ -633,7 +590,6 @@ def aggregate_and_report(sgd_path, adam_path):
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     flush_json(OUT_DIR / "stage_b_results_5seeds.json", final)
 
-    # Write REPORT.md
     lines = [
         "# Batch 12 — LSTM/WikiText-2 Projection 5-Seed Confirm",
         "",
@@ -694,7 +650,6 @@ def aggregate_and_report(sgd_path, adam_path):
     print(f"[AGGREGATE] Report:  {OUT_DIR / 'REPORT.md'}")
     return final
 
-# ─── Main ────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker", action="store_true")
@@ -711,7 +666,6 @@ def main():
         run_a6_ablation()
         return
 
-    # Master: launch two workers in parallel
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     print("="*70)
     print("Batch 12 — LSTM/WikiText-2 5-seed confirm")
@@ -724,13 +678,11 @@ def main():
 
     t_start = time.time()
 
-    # Launch SGD worker (GPU 1)
     proc_sgd = subprocess.Popen(
         [sys.executable, str(script), "--worker", "--optim-type", "sgd", "--gpu", "1"],
         env={**env, "CUDA_VISIBLE_DEVICES": "0,1,2"},
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
     )
-    # Launch Adam worker (GPU 2)
     proc_adam = subprocess.Popen(
         [sys.executable, str(script), "--worker", "--optim-type", "adam", "--gpu", "2"],
         env={**env, "CUDA_VISIBLE_DEVICES": "0,1,2"},
@@ -757,12 +709,10 @@ def main():
     elapsed = time.time() - t_start
     print(f"\n[MASTER] Both workers done in {elapsed/60:.1f} min. rc_sgd={rc_sgd}, rc_adam={rc_adam}")
 
-    # Aggregate
     sgd_path  = OUT_DIR / "partial_sgd.json"
     adam_path = OUT_DIR / "partial_adam.json"
     final = aggregate_and_report(sgd_path, adam_path)
 
-    # Task 2: A6 ablation if G3 confirmed
     delta_adam = final.get("delta_adam_fs_minus_mf")
     if delta_adam is not None and delta_adam > 5.0:
         print(f"\n[TASK 2] G3 confirmed (Δ_adam={delta_adam:.2f} > 5). Running A6 ablation...")
@@ -774,7 +724,6 @@ def main():
     else:
         print(f"\n[TASK 2] Skipping A6 (Δ_adam={delta_adam}; need >5 PPL for Task 2)")
 
-    # Print summary table
     print("\n" + "="*70)
     print("BATCH 12 FINAL SUMMARY")
     print("="*70)

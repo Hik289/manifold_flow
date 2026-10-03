@@ -1,21 +1,5 @@
 #!/usr/bin/env python3
-"""
-CIFAR-100 ResNet-18 SGD paired experiment: Fixed-Stiefel vs ManifoldFlow
-Batch 3b — ManifoldFlow Tier-1 CIFAR-100 validation.
 
-Stage A: Grid search (20 configs × 40 epochs, 1 seed, rho_geo extends below Cora floor)
-Stage B: 3 seeds × 100 epochs, MF-SGD vs FS-SGD
-
-Key implementation notes:
-- ManifoldFlow uses W = Q @ sqrtS_cache in forward (correct §2 algorithm)
-- sqrtS_cache updated only every K_geo steps (huge perf win: avoid per-batch eigh)
-- FixedStiefel uses W = Q (S = I implicitly, sqrtS = I)
-- All conv/fc layers get Stiefel parametrization
-- Per-layer tracking every record_every epochs: P_norm, λ_max/min(S), c_t, a_t
-- SPD health: float32 eigh + λ_min clamp ≥ 1e-6
-
-Cora lesson: rho_geo optimal was at grid floor (1e-3). Grid extended down to 3e-4 here.
-"""
 
 import sys, os, json, time, math, io, warnings, itertools
 from pathlib import Path
@@ -42,7 +26,6 @@ from manifoldflow.tangent import decompose_tangent_normal, project_tangent
 from manifoldflow.manifoldflow_optimizer import _stiefel_sgd_step, ManifoldFlowConfig
 
 
-# ── Serializer ────────────────────────────────────────────────────────────────
 def js(obj):
     if isinstance(obj, dict):   return {k: js(v) for k, v in obj.items()}
     if isinstance(obj, list):   return [js(v) for v in obj]
@@ -53,14 +36,8 @@ def js(obj):
     return obj
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Dataset
-# ══════════════════════════════════════════════════════════════════════════════
-
 class CIFAR100Parquet(Dataset):
-    """CIFAR-100 from HF parquet. Eager-decodes ALL images into uint8 numpy array at init.
-    One-time cost ~30s; then each __getitem__ is a cheap numpy slice + transform.
-    """
+
     MEAN = (0.5071, 0.4865, 0.4409)
     STD  = (0.2673, 0.2564, 0.2762)
 
@@ -109,79 +86,59 @@ def get_loaders(batch_size=128, num_workers=4):
     return train_ld, test_ld
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Stiefel layer metadata
-# ══════════════════════════════════════════════════════════════════════════════
-
 class LayerMeta:
-    """n=big dim, r=small dim, Q∈ℝ^{n×r} with Q^TQ=I_r."""
+
     def __init__(self, name, n, r, out_ch, in_ch, k,
                  is_transpose, stride=1, padding=1, is_linear=False):
         self.name = name
         self.n, self.r = n, r
         self.out_ch, self.in_ch, self.k = out_ch, in_ch, k
-        self.is_transpose = is_transpose  # True → W = Q^T (or (Q@sqrtS)^T)
+        self.is_transpose = is_transpose
         self.stride, self.padding = stride, padding
-        self.is_linear = is_linear        # True → fc layer, no k×k reshape
+        self.is_linear = is_linear
 
     def effective_weight(self, Q, sqrtS=None):
-        """Compute weight tensor from Q (and optionally sqrtS for MF).
 
-        Returns a contiguous tensor suitable for cuDNN conv2d.
-        """
         if sqrtS is not None:
-            W = Q @ sqrtS                   # [n, r], contiguous
+            W = Q @ sqrtS
         else:
-            W = Q                           # [n, r], contiguous
+            W = Q
         if self.is_transpose:
-            # W.T is [r, n], non-contiguous — make contiguous for cuDNN speed
-            W = W.T.contiguous()            # [r, n], contiguous
+            W = W.T.contiguous()
         if not self.is_linear:
             W = W.view(self.out_ch, self.in_ch, self.k, self.k)
         return W
 
 
 def build_cifar_r18_layers() -> list[LayerMeta]:
-    """All Stiefel layers for CIFAR-100 ResNet-18 (3×3 conv1, no maxpool)."""
+
     layers = []
     def add(name, out_ch, in_ch, k, stride=1, padding=1, is_linear=False):
-        n_sp = in_ch * k * k  # n_spatial
+        n_sp = in_ch * k * k
         if n_sp >= out_ch:
-            # typical: Q∈St(n_sp, out_ch), W = Q^T.view(out_ch, in_ch, k, k)
             layers.append(LayerMeta(name, n_sp, out_ch, out_ch, in_ch, k,
                                      is_transpose=True, stride=stride, padding=padding,
                                      is_linear=is_linear))
         else:
-            # upsample (out_ch > n_sp): Q∈St(out_ch, n_sp), W = Q.view(out_ch, in_ch, k, k)
             layers.append(LayerMeta(name, out_ch, n_sp, out_ch, in_ch, k,
                                      is_transpose=False, stride=stride, padding=padding,
                                      is_linear=is_linear))
 
-    # conv1 (CIFAR 3×3): n_sp=27, out_ch=64 → upsample case
     add('conv1',           64,   3, 3, stride=1, padding=1)
-    # layer1
     add('l1.0.c1',         64,  64, 3); add('l1.0.c2', 64, 64, 3)
     add('l1.1.c1',         64,  64, 3); add('l1.1.c2', 64, 64, 3)
-    # layer2
     add('l2.0.c1',        128,  64, 3); add('l2.0.c2', 128, 128, 3)
     add('l2.0.ds',        128,  64, 1, stride=2, padding=0)
     add('l2.1.c1',        128, 128, 3); add('l2.1.c2', 128, 128, 3)
-    # layer3
     add('l3.0.c1',        256, 128, 3); add('l3.0.c2', 256, 256, 3)
     add('l3.0.ds',        256, 128, 1, stride=2, padding=0)
     add('l3.1.c1',        256, 256, 3); add('l3.1.c2', 256, 256, 3)
-    # layer4
     add('l4.0.c1',        512, 256, 3); add('l4.0.c2', 512, 512, 3)
     add('l4.0.ds',        512, 256, 1, stride=2, padding=0)
     add('l4.1.c1',        512, 512, 3); add('l4.1.c2', 512, 512, 3)
-    # fc
     add('fc',             100, 512, 1, stride=1, padding=0, is_linear=True)
     return layers
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ResNet-18 with Stiefel layers
-# ══════════════════════════════════════════════════════════════════════════════
 
 def _qr_init(n, r, seed=None) -> torch.Tensor:
     g = torch.Generator()
@@ -192,11 +149,7 @@ def _qr_init(n, r, seed=None) -> torch.Tensor:
 
 
 class StiefelR18(nn.Module):
-    """ResNet-18 for CIFAR-100 with all conv/fc weights on Stiefel manifold.
 
-    mode='fs': FixedStiefel (S=I always), W = Q
-    mode='mf': ManifoldFlow, W = Q @ sqrtS  (sqrtS cached, updated every K_geo steps)
-    """
 
     def __init__(self, num_classes=100, mode='fs', seed=42):
         super().__init__()
@@ -210,11 +163,8 @@ class StiefelR18(nn.Module):
             nn.Parameter(_qr_init(m.n, m.r))
             for m in self.layer_meta
         ])
-        # sqrtS_cache: identity initially; updated by update_sqrtS_cache()
-        # Stored as a plain list (not nn parameters — not optimized)
-        self._sqrtS = [None] * len(self.layer_meta)  # None = use I
+        self._sqrtS = [None] * len(self.layer_meta)
 
-        # BatchNorm layers
         def bn(ch): return nn.BatchNorm2d(ch)
         self.bn1         = bn(64)
         self.bn_l1_0_1   = bn(64);  self.bn_l1_0_2 = bn(64)
@@ -234,13 +184,11 @@ class StiefelR18(nn.Module):
         return self.layer_meta[idx].effective_weight(Q, sqS)
 
     def _c(self, name, x, stride=1, padding=1) -> torch.Tensor:
-        """Generic conv2d helper."""
+
         return F.conv2d(x, self._w(name), bias=None, stride=stride, padding=padding)
 
     def forward(self, x):
-        # conv1
         h = F.relu(self.bn1(self._c('conv1', x, stride=1, padding=1)))
-        # layer1
         s = h
         h = F.relu(self.bn_l1_0_1(self._c('l1.0.c1', h)))
         h = self.bn_l1_0_2(self._c('l1.0.c2', h))
@@ -249,7 +197,6 @@ class StiefelR18(nn.Module):
         h = F.relu(self.bn_l1_1_1(self._c('l1.1.c1', h)))
         h = self.bn_l1_1_2(self._c('l1.1.c2', h))
         h = F.relu(h + s)
-        # layer2 (stride-2 downsample)
         s = F.relu(self.bn_l2_0_ds(F.conv2d(h, self._w('l2.0.ds'), stride=2, padding=0)))
         h = F.relu(self.bn_l2_0_1(F.conv2d(h, self._w('l2.0.c1'), stride=2, padding=1)))
         h = self.bn_l2_0_2(self._c('l2.0.c2', h))
@@ -258,7 +205,6 @@ class StiefelR18(nn.Module):
         h = F.relu(self.bn_l2_1_1(self._c('l2.1.c1', h)))
         h = self.bn_l2_1_2(self._c('l2.1.c2', h))
         h = F.relu(h + s)
-        # layer3
         s = F.relu(self.bn_l3_0_ds(F.conv2d(h, self._w('l3.0.ds'), stride=2, padding=0)))
         h = F.relu(self.bn_l3_0_1(F.conv2d(h, self._w('l3.0.c1'), stride=2, padding=1)))
         h = self.bn_l3_0_2(self._c('l3.0.c2', h))
@@ -267,7 +213,6 @@ class StiefelR18(nn.Module):
         h = F.relu(self.bn_l3_1_1(self._c('l3.1.c1', h)))
         h = self.bn_l3_1_2(self._c('l3.1.c2', h))
         h = F.relu(h + s)
-        # layer4
         s = F.relu(self.bn_l4_0_ds(F.conv2d(h, self._w('l4.0.ds'), stride=2, padding=0)))
         h = F.relu(self.bn_l4_0_1(F.conv2d(h, self._w('l4.0.c1'), stride=2, padding=1)))
         h = self.bn_l4_0_2(self._c('l4.0.c2', h))
@@ -276,28 +221,27 @@ class StiefelR18(nn.Module):
         h = F.relu(self.bn_l4_1_1(self._c('l4.1.c1', h)))
         h = self.bn_l4_1_2(self._c('l4.1.c2', h))
         h = F.relu(h + s)
-        # GAP + fc
         h = F.adaptive_avg_pool2d(h, 1).flatten(1)
         return F.linear(h, self._w('fc'), self.fc_bias)
 
     @torch.no_grad()
     def update_sqrtS_cache(self, optimizer):
-        """Sync sqrtS from optimizer state (call after optimizer.step())."""
+
         if self.mode != 'mf':
             return
         for i, (m, Q) in enumerate(zip(self.layer_meta, self.Qs)):
             st = optimizer.state.get(Q)
             if st and 'S' in st:
-                S = st['S']  # float32 on device
+                S = st['S']
                 sqrtS = matrix_sqrt(sym(S)).to(Q.dtype)
                 self._sqrtS[i] = sqrtS
 
     def stiefel_params_list(self):
-        """Returns list of Q parameters for Stiefel optimizer."""
+
         return list(self.Qs)
 
     def other_params_list(self):
-        """BN + bias params for standard SGD."""
+
         st_ids = {id(Q) for Q in self.Qs}
         return [p for p in self.parameters() if id(p) not in st_ids]
 
@@ -308,12 +252,8 @@ class StiefelR18(nn.Module):
         return '?'
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Optimizers
-# ══════════════════════════════════════════════════════════════════════════════
-
 class FSSGD(torch.optim.Optimizer):
-    """Fixed-Stiefel SGD (S=I). Records P_t diagnostics."""
+
 
     def __init__(self, params, lr=0.1, momentum=0.9):
         super().__init__(params, dict(lr=lr, momentum=momentum))
@@ -345,7 +285,7 @@ class FSSGD(torch.optim.Optimizer):
 
 
 class MFSGD(torch.optim.Optimizer):
-    """ManifoldFlow SGD. S tracked and updated via affine-invariant step."""
+
 
     def __init__(self, params, lr=0.1, momentum=0.9, mf_config=None,
                  total_steps=None):
@@ -354,7 +294,7 @@ class MFSGD(torch.optim.Optimizer):
         self.cfg = mf_config
         self.total_steps = total_steps
         self._plog: dict = {}
-        self._S_updated: set = set()  # track which Q had S updated this step
+        self._S_updated: set = set()
 
     def _warmup_steps(self):
         if self.total_steps is None: return 0
@@ -386,10 +326,8 @@ class MFSGD(torch.optim.Optimizer):
                 split = decompose_tangent_normal(Q, G_bar)
                 G_tan, P_t = split.G_tan, split.P
 
-                # Tangent step (same as FS)
                 Q_new = _stiefel_sgd_step(Q, G_tan, st, lr, mo)
 
-                # Geometry gate (computed first to decide alignment)
                 warmup_done = t >= self._warmup_steps()
                 do_geo = (gamma_t > 0.0) and warmup_done and (t % cfg.K_geo == 0)
 
@@ -421,7 +359,6 @@ class MFSGD(torch.optim.Optimizer):
                 st['Q_prev'] = Q_new.clone()
                 st['step'] = t + 1
 
-                # Pressure log
                 eigvals, _ = fp32_eigh(st['S'])
                 lmin, lmax = float(eigvals.min()), float(eigvals.max())
                 self._plog[id(Q)] = {
@@ -440,10 +377,6 @@ class MFSGD(torch.optim.Optimizer):
         return st.get('S')
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Training utilities
-# ══════════════════════════════════════════════════════════════════════════════
-
 def cosine_lr(base_lr, epoch, total):
     return 0.5 * base_lr * (1 + math.cos(math.pi * epoch / total))
 
@@ -460,7 +393,7 @@ def eval_acc(model, loader, device):
 
 
 def collect_layer_metrics(model, opt_stiefel, mode):
-    """Per-layer metric dict from the last optimizer step."""
+
     plog = opt_stiefel._plog
     out = {}
     for i, (m, Q) in enumerate(zip(model.layer_meta, model.Qs)):
@@ -478,7 +411,6 @@ def collect_layer_metrics(model, opt_stiefel, mode):
                 e['effective_rank_S'] = ef_rank
                 e['spectral_entropy_S'] = sp_ent
         else:
-            # FS: S=I always
             e['lambda_min_S'] = 1.0; e['lambda_max_S'] = 1.0
             e['lambda_ratio_S'] = 1.0
         out[m.name] = e
@@ -487,23 +419,20 @@ def collect_layer_metrics(model, opt_stiefel, mode):
 
 def train_run(mode, train_ld, test_ld, device, seed, lr, wd, momentum,
               mf_config, n_epochs, record_every=5):
-    """Full training run. Returns result dict."""
+
     torch.manual_seed(seed); np.random.seed(seed)
 
     model = StiefelR18(num_classes=100, mode=mode, seed=seed).to(device)
     total_steps = n_epochs * len(train_ld)
 
-    # Stiefel optimizer
     if mode == 'fs':
         opt_s = FSSGD(model.stiefel_params_list(), lr=lr, momentum=momentum)
     else:
         opt_s = MFSGD(model.stiefel_params_list(), lr=lr, momentum=momentum,
                       mf_config=mf_config, total_steps=total_steps)
-    # Standard SGD for BN + bias
     opt_other = torch.optim.SGD(model.other_params_list(), lr=lr,
                                  momentum=momentum, weight_decay=wd)
 
-    # Warm up sqrtS cache for MF (init to I)
     if mode == 'mf':
         for i, (m, Q) in enumerate(zip(model.layer_meta, model.Qs)):
             model._sqrtS[i] = torch.eye(m.r, dtype=Q.dtype, device=device)
@@ -531,7 +460,6 @@ def train_run(mode, train_ld, test_ld, device, seed, lr, wd, momentum,
             nn.utils.clip_grad_norm_(model.other_params_list(), max_norm=10.0)
             opt_s.step()
             opt_other.step()
-            # Sync sqrtS from optimizer state → model cache (fast: only K_geo steps)
             if mode == 'mf' and hasattr(opt_s, '_S_updated') and opt_s._S_updated:
                 model.update_sqrtS_cache(opt_s)
             tr_correct += (out.detach().argmax(1) == y).sum().item()
@@ -539,7 +467,6 @@ def train_run(mode, train_ld, test_ld, device, seed, lr, wd, momentum,
 
         tr_acc = tr_correct / tr_total
 
-        # NaN check
         if any(torch.isnan(Q.data).any() for Q in model.Qs):
             spd_health['nan_detected'] = True
             spd_health['nan_epoch'] = epoch
@@ -549,7 +476,6 @@ def train_run(mode, train_ld, test_ld, device, seed, lr, wd, momentum,
         if (epoch + 1) % record_every == 0 or epoch == n_epochs - 1:
             te_acc = eval_acc(model, test_ld, device)
             lm = collect_layer_metrics(model, opt_s, mode)
-            # SPD health
             for nm, d in lm.items():
                 lmin = d.get('lambda_min_S', 1.0)
                 spd_health['min_lambda_min_ever'] = min(spd_health['min_lambda_min_ever'], lmin)
@@ -570,27 +496,17 @@ def train_run(mode, train_ld, test_ld, device, seed, lr, wd, momentum,
             'wall_sec': time.time() - t0}
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Stage A: Grid search
-# ══════════════════════════════════════════════════════════════════════════════
-
 def stage_a(device, train_ld, test_ld,
             epochs=40, seed=42, time_limit_s=7200.0):
-    """Grid search: 20 configs target, time-limited.
 
-    Ordering: priority sweep (5 rho_geo × lambda_S=1e-4 × K_geo=10) first,
-    then remaining configs. Ensures all rho_geo values are covered even if
-    the time limit cuts the grid short (per Cora lesson: rho_geo is the KEY axis).
-    """
     rho_geo  = [3e-4, 1e-3, 3e-3, 1e-2, 3e-2]
     lambda_S = [1e-4, 1e-3]
     K_geo    = [10, 20]
-    # Priority: one config per rho_geo (lambda_S=1e-4, K_geo=10) — most informative subset
     priority = [(rho, 1e-4, 10) for rho in rho_geo]
     priority_set = set(priority)
     rest = [(rho, lS, Kg) for rho, lS, Kg in itertools.product(rho_geo, lambda_S, K_geo)
             if (rho, lS, Kg) not in priority_set]
-    configs = priority + rest  # 5 priority + 15 rest = 20 total
+    configs = priority + rest
     print(f'Stage A: {len(configs)} configs × {epochs} epochs | seed={seed}')
 
     results = []
@@ -618,13 +534,9 @@ def stage_a(device, train_ld, test_ld,
     return results
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Stage B: Paired comparison
-# ══════════════════════════════════════════════════════════════════════════════
-
 def stage_b(device, train_ld, test_ld, best_mf_cfg,
             epochs=100, seeds=(42, 123, 456)):
-    """MF-SGD vs FS-SGD × 3 seeds × 100 epochs."""
+
     accs = {'mf': [], 'fs': []}
     trajs = {'mf': {}, 'fs': {}}
     spd   = {'mf': {}, 'fs': {}}
@@ -643,10 +555,6 @@ def stage_b(device, train_ld, test_ld, best_mf_cfg,
 
     return accs, trajs, spd
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Statistics and report
-# ══════════════════════════════════════════════════════════════════════════════
 
 def verdict(mf_list, fs_list):
     mf, fs = np.array(mf_list), np.array(fs_list)
@@ -671,7 +579,6 @@ def write_report(out_dir, best_cfg, accs, verd, trajs, spd_health, args):
     seeds = [42, 123, 456]
     mf_a, fs_a = accs['mf'], accs['fs']
 
-    # G4: λ_ratio per layer from MF runs (last few records)
     g4 = {}
     for seed_str, traj in trajs.get('mf', {}).items():
         for rec in traj[-3:]:
@@ -763,10 +670,6 @@ def write_report(out_dir, best_cfg, accs, verd, trajs, spd_health, args):
     print('Report written.')
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Main
-# ══════════════════════════════════════════════════════════════════════════════
-
 def main():
     import argparse
     p = argparse.ArgumentParser()
@@ -797,7 +700,6 @@ def main():
     train_ld, test_ld = get_loaders(args.batch, args.workers)
     print(f'Loaded in {time.time()-t0:.1f}s')
 
-    # ── Stage A ────────────────────────────────────────────────────────────────
     if args.stage in ('a', 'ab'):
         print('\n' + '='*60 + '\nSTAGE A\n' + '='*60)
         grid_results = stage_a(device, train_ld, test_ld,
@@ -815,7 +717,6 @@ def main():
         best_cfg = json.loads((meth_dir / 'hyperparam_chosen.json').read_text())
     print(f'Best config: {best_cfg}')
 
-    # ── Stage B ────────────────────────────────────────────────────────────────
     if args.stage in ('b', 'ab'):
         print('\n' + '='*60 + '\nSTAGE B\n' + '='*60)
         best_mf_cfg = ManifoldFlowConfig(
@@ -834,7 +735,6 @@ def main():
         print(f'  Δ = {verd["mean_diff"]*100:.4f}% | SE={verd["se_diff"]*100:.4f}%')
         print(f'  p(1-sided)={verd["p_one_sided"]:.4f} | G3: {verd["verdict"]}')
 
-        # Save method_1 results
         (meth_dir / 'stage_b_results.json').write_text(json.dumps(js({
             'mf_accs': accs['mf'], 'fs_accs': accs['fs'],
             'verdict': verd, 'config': best_cfg,
@@ -842,7 +742,6 @@ def main():
         (meth_dir / 'spectral_trajectory.json').write_text(json.dumps(js(trajs), indent=2))
         (meth_dir / 'spd_health.json').write_text(json.dumps(js(spd), indent=2))
 
-        # Save anchor_3 results
         fs_arr = np.array(accs['fs'])
         (anch_dir / 'stage_b_results.json').write_text(json.dumps(js({
             'fs_sgd_accs': accs['fs'],

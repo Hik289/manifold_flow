@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""
-CIFAR-100 R18 Layer-Selective Stiefel H1 Diagnostic
-Task B: B1 (fc-only Stiefel) + B2 (layer4-only Stiefel)
-GPU: 2 | Flush to JSON every epoch to survive timeout/signal
 
-Core question: is conv cos_P≈0 due to cross-layer interference or true absence of H1 signal?
-Acceptance:
-  cos > 0.3 in first 1/3 (epoch 1-10) → H1 signal exists in that layer
-  cos ≈ 0 → true absence, negative paper
-"""
 
 import sys, os, json, time, math, io, atexit, signal, warnings
 from pathlib import Path
@@ -35,7 +26,6 @@ from manifoldflow.manifoldflow_optimizer import _stiefel_sgd_step, ManifoldFlowC
 
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── Serializer ────────────────────────────────────────────────────────────────
 def js(obj):
     if isinstance(obj, dict):  return {k: js(v) for k, v in obj.items()}
     if isinstance(obj, list):  return [js(v) for v in obj]
@@ -45,7 +35,6 @@ def js(obj):
     if isinstance(obj, torch.Tensor):   return float(obj.item())
     return obj
 
-# ── Partial results ───────────────────────────────────────────────────────────
 _results_b1 = {"status": "running", "epochs": []}
 _results_b2 = {"status": "running", "epochs": []}
 
@@ -67,9 +56,6 @@ def sig_handler(signum, frame):
 signal.signal(signal.SIGTERM, sig_handler)
 signal.signal(signal.SIGINT, sig_handler)
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Dataset
-# ══════════════════════════════════════════════════════════════════════════════
 
 class CIFAR100Parquet(Dataset):
     MEAN = (0.5071, 0.4865, 0.4409)
@@ -111,9 +97,6 @@ def get_loaders(batch_size=128, num_workers=4):
                           num_workers=num_workers, pin_memory=True)
     return train_ld, test_ld
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Standard ResNet-18 for CIFAR-100 (no Stiefel on base — will replace selectively)
-# ══════════════════════════════════════════════════════════════════════════════
 
 class BasicBlock(nn.Module):
     def __init__(self, in_planes, planes, stride=1):
@@ -139,7 +122,7 @@ class BasicBlock(nn.Module):
 
 
 class StandardR18(nn.Module):
-    """Standard ResNet-18 for CIFAR-100 (3x3 first conv, no maxpool)."""
+
     def __init__(self, num_classes=100):
         super().__init__()
         self.conv1  = nn.Conv2d(3, 64, 3, stride=1, padding=1, bias=False)
@@ -168,36 +151,27 @@ class StandardR18(nn.Module):
         return self.fc(h)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Stiefel Layer Wrappers
-# ══════════════════════════════════════════════════════════════════════════════
-
 class StiefelLinear(nn.Module):
-    """FC layer: W = Q @ sqrtS (or just Q for FS), Q ∈ St(n, r)."""
+
     def __init__(self, in_features, out_features, mode='mf'):
         super().__init__()
         self.mode = mode
-        # n >= r, n=in_features=512, r=out_features=100
         n, r = in_features, out_features
         Q_init = torch.linalg.qr(torch.randn(n, r))[0]
         self.Q = nn.Parameter(Q_init.float())
         self.bias = nn.Parameter(torch.zeros(out_features))
-        self._sqrtS = torch.eye(r)  # updated externally for MF
+        self._sqrtS = torch.eye(r)
 
     def forward(self, x):
         if self.mode == 'mf' and self._sqrtS is not None:
             W = self.Q @ self._sqrtS.to(self.Q.device, self.Q.dtype)
         else:
             W = self.Q
-        return F.linear(x, W.T, self.bias)  # W.T = [out, in]
+        return F.linear(x, W.T, self.bias)
 
 
 class StiefelConv2d(nn.Module):
-    """Conv2d with Stiefel parametrization.
-    For a [out_ch, in_ch, k, k] conv:
-      If in_ch*k*k >= out_ch: Q∈St(in_ch*k*k, out_ch), W = Q^T.view(out_ch, in_ch, k, k)
-      Else: Q∈St(out_ch, in_ch*k*k), W = Q.view(out_ch, in_ch, k, k)
-    """
+
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, mode='mf'):
         super().__init__()
         self.mode = mode
@@ -208,7 +182,6 @@ class StiefelConv2d(nn.Module):
         self.kernel_size = kernel_size
         n_sp = in_channels * kernel_size * kernel_size
         if n_sp >= out_channels:
-            # transpose case: Q∈St(n_sp, out_channels)
             n, r = n_sp, out_channels
             self.is_transpose = True
         else:
@@ -225,9 +198,9 @@ class StiefelConv2d(nn.Module):
         else:
             W_flat = self.Q
         if self.is_transpose:
-            W = W_flat.T.contiguous()  # [out_ch, n_sp]
+            W = W_flat.T.contiguous()
         else:
-            W = W_flat  # [out_ch, n_sp]
+            W = W_flat
         return W.view(self.out_channels, self.in_channels,
                       self.kernel_size, self.kernel_size)
 
@@ -236,21 +209,13 @@ class StiefelConv2d(nn.Module):
                         stride=self.stride, padding=self.padding)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Hybrid ResNet-18: selectively replace layers with Stiefel variants
-# ══════════════════════════════════════════════════════════════════════════════
-
 class HybridR18(nn.Module):
-    """ResNet-18 with selective Stiefel layers.
-    mode: 'fc_only' or 'layer4_only'
-    stiefel_mode: 'mf' or 'fs'
-    """
+
     def __init__(self, mode='fc_only', stiefel_mode='mf', num_classes=100):
         super().__init__()
         self.hybrid_mode = mode
         self.stiefel_mode = stiefel_mode
 
-        # Build standard base first
         self.conv1  = nn.Conv2d(3, 64, 3, stride=1, padding=1, bias=False)
         self.bn1    = nn.BatchNorm2d(64)
         self.layer1 = self._make_std_layer(64,  64,  2, stride=1)
@@ -258,18 +223,15 @@ class HybridR18(nn.Module):
         self.layer3 = self._make_std_layer(128, 256, 2, stride=2)
 
         if mode == 'layer4_only':
-            # layer4 gets Stiefel convs
             self.layer4 = self._make_stiefel_layer(256, 512, 2, stride=2)
             self.fc = nn.Linear(512, num_classes)
         elif mode == 'fc_only':
-            # layer4 standard, fc gets Stiefel
             self.layer4 = self._make_std_layer(256, 512, 2, stride=2)
             self.fc = StiefelLinear(512, num_classes, mode=stiefel_mode)
         else:
             raise ValueError(f"Unknown mode: {mode}")
 
-        # Track which Q params are Stiefel
-        self._stiefel_modules = []  # list of (name, module) pairs with .Q param
+        self._stiefel_modules = []
 
     def _make_std_layer(self, in_planes, planes, num_blocks, stride):
         strides = [stride] + [1] * (num_blocks - 1)
@@ -280,19 +242,16 @@ class HybridR18(nn.Module):
         return nn.Sequential(*layers)
 
     def _make_stiefel_layer(self, in_planes, planes, num_blocks, stride):
-        """Build layer4 with StiefelConv2d replacements."""
-        # Block 0: stride=2, has downsample
+
         blocks = []
-        # Block 0
         b0 = self._make_stiefel_block(in_planes, planes, stride=stride)
         blocks.append(b0)
-        # Block 1..n-1: stride=1
         for _ in range(1, num_blocks):
             blocks.append(self._make_stiefel_block(planes, planes, stride=1))
         return nn.ModuleList(blocks)
 
     def _make_stiefel_block(self, in_planes, planes, stride=1):
-        """BasicBlock-like but with StiefelConv2d."""
+
         class StiefelBasicBlock(nn.Module):
             def __init__(sb, in_p, p, s):
                 super().__init__()
@@ -317,16 +276,15 @@ class HybridR18(nn.Module):
         return StiefelBasicBlock(in_planes, planes, stride)
 
     def get_stiefel_params(self):
-        """Return list of Q parameters that need Stiefel optimization."""
+
         params = []
-        # Walk all submodules looking for StiefelConv2d and StiefelLinear
         for module in self.modules():
             if isinstance(module, (StiefelConv2d, StiefelLinear)):
                 params.append(module.Q)
         return params
 
     def get_stiefel_modules(self):
-        """Return list of stiefel modules for cos_P tracking."""
+
         modules = []
         for name, module in self.named_modules():
             if isinstance(module, (StiefelConv2d, StiefelLinear)):
@@ -338,7 +296,7 @@ class HybridR18(nn.Module):
         return [p for p in self.parameters() if id(p) not in stiefel_ids]
 
     def update_sqrtS_cache(self, optimizer):
-        """Sync sqrtS from optimizer state → model cache."""
+
         if self.stiefel_mode != 'mf': return
         for module in self.modules():
             if isinstance(module, (StiefelConv2d, StiefelLinear)):
@@ -354,7 +312,6 @@ class HybridR18(nn.Module):
         h = self.layer1(h)
         h = self.layer2(h)
         h = self.layer3(h)
-        # layer4 handling
         if isinstance(self.layer4, nn.ModuleList):
             for block in self.layer4:
                 h = block(h)
@@ -367,12 +324,8 @@ class HybridR18(nn.Module):
             return self.fc(h)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Stiefel SGD Optimizer (single optimizer for all Stiefel params)
-# ══════════════════════════════════════════════════════════════════════════════
-
 class StiefelSGD(torch.optim.Optimizer):
-    """Riemannian SGD on Stiefel. Tracks P_t for H1 analysis."""
+
 
     def __init__(self, params, lr=0.1, momentum=0.9, mf_config=None,
                  total_steps=None, mode='mf'):
@@ -406,16 +359,14 @@ class StiefelSGD(torch.optim.Optimizer):
                     st['S']       = torch.eye(r, dtype=torch.float32, device=Q.device)
                     st['M_P']     = torch.zeros(r, r, dtype=Q.dtype, device=Q.device)
                     st['Q_prev']  = Q.clone()
-                    st['P_prev']  = None  # for inter-epoch cos_P
+                    st['P_prev']  = None
 
                 t, S, M_P, Q_prev = st['step'], st['S'], st['M_P'], st['Q_prev']
                 split = decompose_tangent_normal(Q, G_bar)
                 G_tan, P_t = split.G_tan, split.P
 
-                # Tangent step
                 Q_new = _stiefel_sgd_step(Q, G_tan, st, lr, mo)
 
-                # Geometry update (MF only)
                 do_geo = False
                 a_t, c_t = 0.0, 0.0
                 if self.mode == 'mf':
@@ -450,7 +401,7 @@ class StiefelSGD(torch.optim.Optimizer):
 
                 eigvals, _ = fp32_eigh(st['S'])
                 self._plog[id(Q)] = {
-                    'P_t': P_t.detach().clone(),  # save for inter-epoch cos
+                    'P_t': P_t.detach().clone(),
                     'P_norm': float(P_t.norm()),
                     'G_tan_norm': float(G_tan.norm()),
                     'lambda_min_S': float(eigvals.min()),
@@ -466,10 +417,6 @@ class StiefelSGD(torch.optim.Optimizer):
         eigvals, _ = fp32_eigh(S)
         return float(eigvals.max()), float(eigvals.min())
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Training loop
-# ══════════════════════════════════════════════════════════════════════════════
 
 def cosine_lr(base_lr, epoch, total):
     return 0.5 * base_lr * (1 + math.cos(math.pi * epoch / total))
@@ -487,10 +434,7 @@ def eval_acc(model, loader, device):
 
 def train_ablation(ablation_mode, stiefel_mode, train_ld, test_ld, device,
                    seed, lr, wd, n_epochs, mf_config, out_dict, record_every=5):
-    """
-    ablation_mode: 'fc_only' or 'layer4_only'
-    stiefel_mode: 'mf' or 'fs' (using MF by default for H1 measurement)
-    """
+
     torch.manual_seed(seed); np.random.seed(seed)
 
     model = HybridR18(mode=ablation_mode, stiefel_mode=stiefel_mode,
@@ -510,14 +454,12 @@ def train_ablation(ablation_mode, stiefel_mode, train_ld, test_ld, device,
     opt_other = torch.optim.SGD(other_params, lr=lr, momentum=0.9, weight_decay=wd)
 
     if stiefel_mode == 'mf':
-        # init sqrtS cache
         for module in model.modules():
             if isinstance(module, (StiefelConv2d, StiefelLinear)):
                 r = module.Q.shape[-1]
                 module._sqrtS = torch.eye(r, dtype=module.Q.dtype, device=device)
 
     history = []
-    # For inter-epoch cos_P: store last P_t per Q
     P_epoch_store = {id(Q): None for Q in stiefel_params}
     t0 = time.time()
 
@@ -544,7 +486,6 @@ def train_ablation(ablation_mode, stiefel_mode, train_ld, test_ld, device,
 
         tr_acc = tr_correct / tr_total
 
-        # Compute inter-epoch cos_P (last-step P_t vs previous epoch)
         cos_P_vals = []
         for Q in stiefel_params:
             plog = opt_s._plog.get(id(Q), {})
@@ -567,7 +508,6 @@ def train_ablation(ablation_mode, stiefel_mode, train_ld, test_ld, device,
                 "elapsed_s": time.time() - t0,
             }
 
-            # Spectral state per Stiefel param
             spectral_info = []
             for Q in stiefel_params:
                 spec = opt_s.get_spectral_state(Q)
@@ -598,7 +538,6 @@ def train_ablation(ablation_mode, stiefel_mode, train_ld, test_ld, device,
 
     final_te = eval_acc(model, test_ld, device)
 
-    # Summarize H1 signal
     cos_early = [r["cos_P_this_epoch"] for r in history
                  if r["epoch"] <= 10 and r["cos_P_this_epoch"] is not None]
     cos_all   = [r["cos_P_this_epoch"] for r in history
@@ -618,10 +557,6 @@ def train_ablation(ablation_mode, stiefel_mode, train_ld, test_ld, device,
     return out_dict
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Main
-# ══════════════════════════════════════════════════════════════════════════════
-
 def main():
     device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}", flush=True)
@@ -630,7 +565,6 @@ def main():
     train_ld, test_ld = get_loaders(batch_size=128, num_workers=4)
     print(f"Train batches: {len(train_ld)}, Test batches: {len(test_ld)}", flush=True)
 
-    # MF config: rho=3e-3 lambda_S=1e-3 K_geo=10 (CIFAR Stage A best)
     mf_cfg = ManifoldFlowConfig(
         rho_geo=3e-3, lambda_S=1e-3, K_geo=10, beta_P=0.95,
         tau_c=0.1, tau_r=0.0, alpha_c=5.0, alpha_r=2.0,
@@ -642,7 +576,6 @@ def main():
     lr       = 0.1
     wd       = 5e-4
 
-    # ── B1: Stiefel on fc only ─────────────────────────────────────────────────
     print("\n" + "="*60, flush=True)
     print("B1: Stiefel-on-fc-only (MF mode)", flush=True)
     print("="*60, flush=True)
@@ -667,7 +600,6 @@ def main():
     print(f"\nB1 done. H1 verdict: {_results_b1.get('H1_verdict')}", flush=True)
     print(f"  cos_P early (ep1-10): {_results_b1.get('H1_cos_P_early_mean'):.4f}", flush=True)
 
-    # ── B2: Stiefel on layer4 only ─────────────────────────────────────────────
     print("\n" + "="*60, flush=True)
     print("B2: Stiefel-on-layer4-only (MF mode)", flush=True)
     print("="*60, flush=True)
@@ -692,7 +624,6 @@ def main():
     print(f"\nB2 done. H1 verdict: {_results_b2.get('H1_verdict')}", flush=True)
     print(f"  cos_P early (ep1-10): {_results_b2.get('H1_cos_P_early_mean'):.4f}", flush=True)
 
-    # Write REPORT.md
     write_report()
     print("\nAll done!", flush=True)
 
@@ -729,7 +660,6 @@ def write_report():
     else:
         interp_b2 = "B2 did not complete."
 
-    # Determine overall conclusion
     if b1_cos_early is not None and b2_cos_early is not None:
         if b1_cos_early > 0.3 or b2_cos_early > 0.3:
             overall = "PARTIAL H1 SIGNAL IN VISION: Layer-selective pivot may rescue results."
@@ -756,7 +686,6 @@ def write_report():
         f"- Interpretation: {interp_b1}\n",
     ]
 
-    # B1 epoch table
     if b1.get("epochs"):
         lines += ["| Epoch | train% | test% | cos_P | λ_ratio |",
                   "|-------|--------|-------|-------|---------|"]

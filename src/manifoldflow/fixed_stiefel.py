@@ -1,9 +1,3 @@
-"""Fixed-Stiefel paired baseline.
-
-S_t == I enforced. Shares _stiefel_sgd_step with ManifoldFlowOptimizer to
-guarantee numerical equivalence under rho_geo=0 (unit test #6).
-"""
-
 from __future__ import annotations
 
 from typing import Literal
@@ -18,7 +12,7 @@ BaseOptim = Literal["sgd", "adam"]
 
 
 class FixedStiefelOptimizer(Optimizer):
-    """Fixed-Stiefel SGD (S=I). Shares tangent step with ManifoldFlowOptimizer."""
+
 
     def __init__(
         self,

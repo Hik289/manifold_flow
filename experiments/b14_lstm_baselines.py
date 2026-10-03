@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""
-Batch 14 — LSTM/WikiText-2 baselines for FATAL reviewer gap
-B1: W = Q @ diag(exp(log_s)),  Q ∈ Stiefel (FS optimizer), s > 0
-B2: Unconstrained nn.Linear(hidden, vocab) — no Stiefel
-B3: Intrinsic Muon — tangent-only Stiefel (no SPD learning)
 
-3 seeds: [42, 123, 7]  ×  3 baselines  ×  Adam lr=0.003
-GPU: 2 only
-Output: experiments/comparison/lstm_baselines/{B1_qdiag,B2_dense,B3_intrinsic_muon}/results.json
-"""
 import sys, os, json, time, math, warnings, atexit, signal, traceback
 from pathlib import Path
 from collections import Counter
@@ -33,11 +24,9 @@ HIDDEN_DIM = 128
 VOCAB_SIZE_TARGET = 10000
 LR         = 0.003
 
-# MF-Adam reference PPLs (seeds 42, 123, 7) from stage_b_results_5seeds.json
 MF_ADAM_PPLS = {42: 273.6116260829776, 123: 276.1922541917133, 7: 281.0335268554727}
-MF_ADAM_MEAN = float(np.mean(list(MF_ADAM_PPLS.values())))  # 276.946...
+MF_ADAM_MEAN = float(np.mean(list(MF_ADAM_PPLS.values())))
 
-# ─── Serializer ─────────────────────────────────────────────────────────────
 def js(obj):
     if isinstance(obj, dict):           return {k: js(v) for k, v in obj.items()}
     if isinstance(obj, list):           return [js(v) for v in obj]
@@ -80,7 +69,6 @@ def _qr_init(n, r, seed=None):
     return Q.float()
 
 
-# ─── Newton-Schulz orthogonalization (for Intrinsic Muon) ──────────────────
 def newton_schulz_5(G, steps=5, eps=1e-7):
     import torch
     a, b, c = 3.4445, -4.7750, 2.0315
@@ -97,36 +85,31 @@ def newton_schulz_5(G, steps=5, eps=1e-7):
     return X.to(G.dtype)
 
 
-# ─── Stiefel tangent helpers ─────────────────────────────────────────────────
 def project_tangent(Q, Z):
-    """Project Z onto tangent space of Stiefel at Q: Z - Q sym(Q.T Z)"""
+
     import torch
     S = Q.T @ Z
     return Z - Q @ (0.5 * (S + S.T))
 
 
 def qr_retract(Q, Z):
-    """Retraction: QR decomp of Q + Z"""
+
     import torch
     M = Q + Z
     Qn, R = torch.linalg.qr(M)
-    # Fix signs so diagonal of R is positive
     d = torch.sign(torch.diagonal(R))
     d[d == 0] = 1.0
     return Qn * d.unsqueeze(0)
 
 
-# ─── IntrinsicMuon Optimizer (standalone, param-level) ──────────────────────
 class IntrinsicMuonOptimizer:
-    """Stiefel Riemannian Muon: tangent-grad → NS5 → momentum → QR retract.
-    No S_t learning. Mirrors mlp_batch10_im.py but operates on arbitrary params.
-    """
+
     def __init__(self, stiefel_params, lr=3e-2, momentum=0.95, ns_steps=5):
         self.params   = list(stiefel_params)
         self.lr       = lr
         self.momentum = momentum
         self.ns_steps = ns_steps
-        self._m = {}  # momentum buffer
+        self._m = {}
 
     def zero_grad(self):
         for p in self.params:
@@ -141,28 +124,22 @@ class IntrinsicMuonOptimizer:
                     continue
                 qid = id(Q)
                 G_bar = Q.grad.float()
-                # Project to tangent
                 G_tan = project_tangent(Q.float(), G_bar)
-                # Newton-Schulz
                 D_ns  = newton_schulz_5(G_tan, steps=self.ns_steps)
-                D_ns  = D_ns * G_tan.norm()  # rescale by grad norm
-                # Momentum
+                D_ns  = D_ns * G_tan.norm()
                 if qid not in self._m:
                     self._m[qid] = torch.zeros_like(D_ns)
                 m = self._m[qid]
                 m_new = self.momentum * m + D_ns
                 m_proj = project_tangent(Q.float(), m_new)
                 self._m[qid] = m_proj
-                # QR retraction
                 Q_new = qr_retract(Q.float(), -self.lr * m_proj)
-                # Transport momentum
                 self._m[qid] = project_tangent(Q_new, m_proj)
                 Q.data.copy_(Q_new.to(Q.dtype))
 
 
-# ─── Model definitions ──────────────────────────────────────────────────────
 def make_b1_model(vocab_size, embed_dim, hidden_dim, seed, device):
-    """B1: W = Q @ diag(exp(log_s)), Q on Stiefel (via FS MF optimizer)."""
+
     import torch, torch.nn as nn, torch.nn.functional as F
 
     class B1LSTMModel(nn.Module):
@@ -170,7 +147,6 @@ def make_b1_model(vocab_size, embed_dim, hidden_dim, seed, device):
             super().__init__()
             self.embed = nn.Embedding(vocab_size, embed_dim)
             self.lstm  = nn.LSTM(embed_dim, hidden_dim, num_layers=1, batch_first=False)
-            # vocab_size > hidden_dim → Q: (vocab_size, hidden_dim), no transpose
             n, r = vocab_size, hidden_dim
             self.proj_Q     = nn.Parameter(_qr_init(n, r, seed))
             self.proj_log_s = nn.Parameter(torch.zeros(r, device=device))
@@ -181,7 +157,7 @@ def make_b1_model(vocab_size, embed_dim, hidden_dim, seed, device):
             emb = self.embed(x)
             out, hidden = self.lstm(emb, hidden)
             s     = torch.exp(self.proj_log_s)
-            W     = self.proj_Q * s.unsqueeze(0)   # (vocab, hidden) * (hidden,) → (vocab, hidden)
+            W     = self.proj_Q * s.unsqueeze(0)
             logits = F.linear(out.view(-1, out.size(-1)), W, self.proj_bias)
             return logits, hidden
 
@@ -189,7 +165,7 @@ def make_b1_model(vocab_size, embed_dim, hidden_dim, seed, device):
 
 
 def make_b2_model(vocab_size, embed_dim, hidden_dim, seed, device):
-    """B2: standard nn.Linear, no Stiefel."""
+
     import torch, torch.nn as nn, torch.nn.functional as F
 
     class B2LSTMModel(nn.Module):
@@ -211,7 +187,7 @@ def make_b2_model(vocab_size, embed_dim, hidden_dim, seed, device):
 
 
 def make_b3_model(vocab_size, embed_dim, hidden_dim, seed, device):
-    """B3: FS-like LSTM (Q only, no S), optimized with IntrinsicMuon."""
+
     import torch, torch.nn as nn, torch.nn.functional as F
 
     class B3LSTMModel(nn.Module):
@@ -233,7 +209,6 @@ def make_b3_model(vocab_size, embed_dim, hidden_dim, seed, device):
     return B3LSTMModel().to(device)
 
 
-# ─── Data loading ────────────────────────────────────────────────────────────
 _DATASET_CACHE = {}
 
 def load_wt2_data(device):
@@ -290,7 +265,6 @@ def eval_ppl(model, val_data):
     return math.exp(total_loss / total_tokens)
 
 
-# ─── Runner ──────────────────────────────────────────────────────────────────
 def run_b1(seed, device, train_data, val_data, vocab_size):
     import torch
     from manifoldflow.manifoldflow_optimizer import ManifoldFlowConfig, ManifoldFlowOptimizer
@@ -300,7 +274,6 @@ def run_b1(seed, device, train_data, val_data, vocab_size):
     n_batches   = (train_data.size(0) - 1) // SEQ_LEN
     total_steps = N_EPOCHS * n_batches
 
-    # Q: Stiefel via FS (rho_geo=0 = no SPD step, just manifold retraction)
     cfg = ManifoldFlowConfig(rho_geo=0.0, beta_P=0.95, lambda_S=0.001, K_geo=10)
     q_params    = [model.proj_Q]
     other_params = [p for n, p in model.named_parameters() if 'proj_Q' not in n]
@@ -392,18 +365,15 @@ def run_b3(seed, device, train_data, val_data, vocab_size):
             "epoch_ppls": epoch_ppls, "elapsed": time.time() - t0}
 
 
-# ─── Main ────────────────────────────────────────────────────────────────────
 def main():
     import torch
-    device = torch.device("cuda:0")  # GPU 2 (via CUDA_VISIBLE_DEVICES=2)
+    device = torch.device("cuda:0")
     print(f"Device: {device}  ({torch.cuda.get_device_name(0)})", flush=True)
 
     OUT_BASE.mkdir(parents=True, exist_ok=True)
 
-    # Load data once
     train_data, val_data, vocab_size, _ = load_wt2_data(device)
 
-    # Global state for atexit
     all_results = {"B1_qdiag": {}, "B2_dense": {}, "B3_intrinsic_muon": {}}
     partial_path = OUT_BASE / "partial_all.json"
 
@@ -414,7 +384,6 @@ def main():
     atexit.register(_atexit)
     signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
 
-    # Load existing partial
     if partial_path.exists():
         try:
             with open(partial_path) as f:
@@ -451,7 +420,6 @@ def main():
                 all_results[bname][skey] = {"status": "failed", "error": str(e)}
                 flush_json(partial_path, all_results)
 
-    # ─── Write per-baseline results.json ─────────────────────────────────────
     print(f"\n{'='*60}", flush=True)
     print("SUMMARY", flush=True)
     print(f"{'='*60}", flush=True)
@@ -472,17 +440,16 @@ def main():
             ppl_vals = list(ppls.values())
             mean_ppl = float(np.mean(ppl_vals))
             std_ppl  = float(np.std(ppl_vals))
-            delta_vs_mf = mean_ppl - MF_ADAM_MEAN   # positive = baseline worse (MF better)
+            delta_vs_mf = mean_ppl - MF_ADAM_MEAN
         else:
             mean_ppl = std_ppl = delta_vs_mf = None
             ppl_vals = []
 
-        # Paired diffs
         paired_diffs = {}
         for seed, ppl in ppls.items():
             mf_ppl = MF_ADAM_PPLS.get(seed, None)
             if mf_ppl is not None:
-                paired_diffs[seed] = ppl - mf_ppl  # positive = baseline worse
+                paired_diffs[seed] = ppl - mf_ppl
 
         per_seed = {}
         for seed in SEEDS:
@@ -505,7 +472,7 @@ def main():
             "mean_ppl": mean_ppl,
             "std_ppl": std_ppl,
             "mf_adam_reference_mean": MF_ADAM_MEAN,
-            "delta_vs_mf_adam_mean": delta_vs_mf,  # positive = MF better (lower PPL)
+            "delta_vs_mf_adam_mean": delta_vs_mf,
             "ppls": ppl_vals,
         }
 
@@ -516,7 +483,6 @@ def main():
         delta_str = f"Δ={delta_vs_mf:+.2f}" if delta_vs_mf else "N/A"
         print(f"  {bname:25s}: PPL={ppl_str}  {delta_str} (pos=MF better)", flush=True)
 
-    # ─── Verdict ──────────────────────────────────────────────────────────────
     print(f"\nMF-Adam reference: {MF_ADAM_MEAN:.2f} PPL (seeds 42/123/7)", flush=True)
     print(f"Verdict threshold: PPL > {MF_ADAM_MEAN + 5:.1f} = MF dominates\n", flush=True)
 
@@ -537,7 +503,6 @@ def main():
     for bname, v in verdicts.items():
         print(f"  {bname}: {v}", flush=True)
 
-    # Overall
     deltas = [summary[b]["delta_vs_mf_adam_mean"] for b in summary
               if summary[b]["delta_vs_mf_adam_mean"] is not None]
     if deltas and all(d > 5 for d in deltas):
@@ -551,7 +516,6 @@ def main():
 
     print(f"\nOVERALL: {overall}", flush=True)
 
-    # Final combined summary
     flush_json(OUT_BASE / "summary.json", {
         "baselines": summary,
         "verdicts": verdicts,

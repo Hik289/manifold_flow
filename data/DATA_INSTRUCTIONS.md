@@ -12,7 +12,6 @@ Used in: LSTM and Mini-Transformer experiments.
 ```python
 from datasets import load_dataset
 ds = load_dataset("wikitext", "wikitext-2-raw-v1")
-# train/validation/test splits available
 ```
 
 Or via manual download:

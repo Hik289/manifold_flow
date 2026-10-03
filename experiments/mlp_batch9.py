@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""
-Batch 9 — MLP trace + Adam fix
-- ADAM FIX: remove v (2nd moment) transport to prevent negative v → NaN sqrt
-- Per-epoch per-layer trace: H1 cos_P, G4 λ_max/λ_min, P_norm, G_tan_norm, gate a_t
-- Tasks: Adult (GPU1) + Covertype (GPU2)  |  NO CIFAR-10
-- Outputs: stage_b_results_v2.json, h1_pressure_persistence.json, g4_spectral_trace.json, REPORT.md
-"""
+
 import sys, os, json, time, math, warnings, argparse, atexit, signal, traceback
 from pathlib import Path
 import numpy as np
@@ -28,7 +22,6 @@ from manifoldflow.retraction import qr_retract, procrustes_align
 from manifoldflow.tangent import decompose_tangent_normal, project_tangent
 from manifoldflow.manifoldflow_optimizer import _stiefel_sgd_step, ManifoldFlowConfig
 
-# ─── Serializer ────────────────────────────────────────────────────────────
 def js(obj):
     if isinstance(obj, dict):          return {k: js(v) for k, v in obj.items()}
     if isinstance(obj, list):          return [js(v) for v in obj]
@@ -39,7 +32,6 @@ def js(obj):
     if obj is None:                    return None
     return obj
 
-# ─── QR init ─────────────────────────────────────────────────────────────
 def _qr_init(n, r, seed=None):
     g = torch.Generator()
     if seed is not None: g.manual_seed(seed)
@@ -47,7 +39,6 @@ def _qr_init(n, r, seed=None):
     Q, _ = torch.linalg.qr(A)
     return Q.float()
 
-# ─── StiefelLinear ────────────────────────────────────────────────────────
 class StiefelLinear(nn.Module):
     def __init__(self, in_dim, out_dim, seed=None, mode='fs'):
         super().__init__()
@@ -106,15 +97,11 @@ class StiefelMLP(nn.Module):
 class StiefelAdamState:
     def __init__(self):
         self.step = 0
-        self.m = None   # first moment (tangent vector — transport is OK)
-        self.v = None   # second moment (scale matrix — NO TRANSPORT)
+        self.m = None
+        self.v = None
 
 def stiefel_adam_step(Q, G_tan, state_obj, lr, betas=(0.9, 0.999), eps=1e-8):
-    """
-    Fixed Riemannian Adam on Stiefel manifold.
-    Key fix: v (second moment) NOT transported through tangent projection.
-    v stores elementwise variance estimates; projection destroys positivity.
-    """
+
     beta1, beta2 = betas
     if state_obj.m is None:
         state_obj.m = torch.zeros_like(G_tan)
@@ -122,30 +109,23 @@ def stiefel_adam_step(Q, G_tan, state_obj, lr, betas=(0.9, 0.999), eps=1e-8):
     state_obj.step += 1
     t = state_obj.step
 
-    # Update moments
     m_new = beta1 * state_obj.m + (1 - beta1) * G_tan
     v_new = beta2 * state_obj.v + (1 - beta2) * G_tan.pow(2)
     state_obj.m = m_new
-    state_obj.v = v_new  # v remains NOT transported
+    state_obj.v = v_new
 
-    # Bias correction
     m_hat = m_new / (1 - beta1**t)
     v_hat = v_new / (1 - beta2**t)
 
-    # v_hat should be non-negative (it's sum of squared tangent components);
-    # clamp to eps to guard against any numerical underflow
     v_hat_safe = v_hat.clamp(min=0.0)
 
     D = project_tangent(Q, m_hat / (v_hat_safe.sqrt() + eps))
     Q_new = qr_retract(Q, -lr * D)
 
-    # Transport ONLY m (first moment is a tangent vector — transport matters)
     state_obj.m = project_tangent(Q_new, state_obj.m)
-    # v is NOT transported — intentionally left as-is
     return Q_new
 
 
-# ─── FS Optimizer ──────────────────────────────────────────────────────────
 class StiefelFSOptimizer:
     def __init__(self, model, base_optim='sgd', lr=0.01, momentum=0.9,
                  betas=(0.9, 0.999), weight_decay=1e-4):
@@ -199,7 +179,6 @@ class StiefelFSOptimizer:
         self.bias_optim.param_groups[0]['lr'] = lr
 
 
-# ─── MF Optimizer ──────────────────────────────────────────────────────────
 class StiefelMFOptimizer:
     def __init__(self, model, base_optim='sgd', lr=0.01, momentum=0.9,
                  betas=(0.9, 0.999), weight_decay=1e-4,
@@ -217,8 +196,8 @@ class StiefelMFOptimizer:
         self.bias_optim  = torch.optim.Adam(
             [l.bias for l in model.layers], lr=lr, weight_decay=weight_decay)
         self._P_prev        = {}
-        self._last_gate     = {}   # for trace
-        self._last_S_stats  = {}   # for trace
+        self._last_gate     = {}
+        self._last_S_stats  = {}
 
     def _warmup_steps(self):
         if self.total_steps is None: return 0
@@ -264,14 +243,12 @@ class StiefelMFOptimizer:
             P_norm_per_layer[name]     = float(P_t.norm().item())
             G_tan_norm_per_layer[name] = float(G_tan.norm().item())
 
-            # Stiefel step (FIXED Adam)
             if self.base_optim == 'sgd':
                 Q_new = _stiefel_sgd_step(Q.float(), G_tan, state, self.lr, self.momentum)
             else:
                 astate = self.adam_states.setdefault(qid, StiefelAdamState())
                 Q_new  = stiefel_adam_step(Q.float(), G_tan, astate, self.lr, self.betas)
 
-            # SPD geometry update
             t = state['step']; gamma_t = cfg.rho_geo * self.lr
             M_P    = state['M_P'].to(dev)
             Q_prev = state['Q_prev'].to(dev)
@@ -339,7 +316,6 @@ class StiefelMFOptimizer:
         self.bias_optim.param_groups[0]['lr'] = lr
 
 
-# ─── Data loaders ──────────────────────────────────────────────────────────
 def load_adult(seed=0):
     from sklearn.datasets import fetch_openml
     from sklearn.preprocessing import StandardScaler, LabelEncoder
@@ -405,7 +381,6 @@ def make_optimizer(model, mode_str, base_opt, lr, rho_geo, lambda_S, K_geo, tota
                                    total_steps=total_steps)
 
 
-# ─── Per-epoch trace ────────────────────────────────────────────────────────
 def make_epoch_trace(ep, cos_P, P_norm, G_tan_norm, mode_str, opt):
     rec = {'epoch': ep, 'cos_P': cos_P, 'P_norm': P_norm, 'G_tan_norm': G_tan_norm}
     if mode_str == 'mf':
@@ -414,7 +389,6 @@ def make_epoch_trace(ep, cos_P, P_norm, G_tan_norm, mode_str, opt):
     return rec
 
 
-# ─── Train one seed ────────────────────────────────────────────────────────
 def train_one(in_dim, hidden_dim, out_dim, method, lr, seed, n_epochs,
               tr_ld, val_ld, test_ld, device, total_steps,
               rho_geo=3e-3, lambda_S=1e-3, K_geo=10):
@@ -428,7 +402,7 @@ def train_one(in_dim, hidden_dim, out_dim, method, lr, seed, n_epochs,
 
     history   = []
     per_epoch_trace = []
-    h1_cos_accum    = {nm: [] for nm in model.layer_names}  # only first 1/3
+    h1_cos_accum    = {nm: [] for nm in model.layer_names}
     t0 = time.time()
     global_step = 0
     third_mark  = total_steps // 3
@@ -468,7 +442,6 @@ def train_one(in_dim, hidden_dim, out_dim, method, lr, seed, n_epochs,
         test_acc = eval_acc(model, test_ld, device)
         elapsed  = time.time() - t0
 
-        # Epoch mean trace
         epoch_cos   = {nm: float(np.mean(v)) for nm, v in ep_cos_P.items()  if v}
         epoch_Pn    = {nm: float(np.mean(v)) for nm, v in ep_P_norm.items() if v}
         epoch_Gtan  = {nm: float(np.mean(v)) for nm, v in ep_G_tan.items()  if v}
@@ -481,7 +454,6 @@ def train_one(in_dim, hidden_dim, out_dim, method, lr, seed, n_epochs,
             print(f"    ep{ep:3d} train={tr_acc:.4f} val={val_acc:.4f} test={test_acc:.4f} {elapsed:.0f}s",
                   flush=True)
 
-    # H1 stats (first 1/3 of training)
     h1_stats = {}
     for nm, vals in h1_cos_accum.items():
         if len(vals) > 3:
@@ -506,7 +478,6 @@ def train_one(in_dim, hidden_dim, out_dim, method, lr, seed, n_epochs,
     }
 
 
-# ─── G3 paired test ────────────────────────────────────────────────────────
 def g3_paired_test(mf_results, fs_results):
     mf_accs = [r['history'][-1]['test_acc'] for r in mf_results]
     fs_accs = [r['history'][-1]['test_acc'] for r in fs_results]
@@ -527,10 +498,9 @@ def g3_paired_test(mf_results, fs_results):
     }
 
 
-# ─── Adam quick-verify ─────────────────────────────────────────────────────
 def verify_adam_fix(in_dim, hidden_dim, out_dim, device, tr_ld, val_ld, test_ld,
                     lr=0.001, n_epochs=30, rho_geo=3e-3, lambda_S=1e-3, K_geo=10):
-    """Quick 1-seed 30-epoch FS-Adam verify. Returns test_acc."""
+
     print(f"\n[Adam verify] FS-Adam lr={lr} 30ep seed=42", flush=True)
     result = train_one(in_dim, hidden_dim, out_dim, 'fs-adam', lr, 42, n_epochs,
                        tr_ld, val_ld, test_ld, device,
@@ -541,7 +511,6 @@ def verify_adam_fix(in_dim, hidden_dim, out_dim, device, tr_ld, val_ld, test_ld,
     return acc
 
 
-# ─── Main run ──────────────────────────────────────────────────────────────
 PRESET_LRS = {
     'adult':    {'fs-sgd': 0.01, 'fs-adam': 0.001, 'mf-sgd': 0.01, 'mf-adam': 0.001},
     'covertype':{'fs-sgd': 0.01, 'fs-adam': 0.001, 'mf-sgd': 0.01, 'mf-adam': 0.001},
@@ -573,13 +542,11 @@ def run_task(task_name, out_dir, device, skip_adam=False):
 
     best_lrs = PRESET_LRS[task_name]
 
-    # ─── Adam verify (adult only) ─────────────────────────────────────────
     adam_verified = False
     if task_name == 'adult' and not skip_adam:
         acc_30 = verify_adam_fix(in_dim, hidden, out_dim, device, tr_ld, val_ld, test_ld,
                                   lr=0.001, n_epochs=30)
         if acc_30 < 0.80:
-            # try higher lr
             print(f"[Adam verify] FAILED ({acc_30:.4f} < 0.80). Trying lr=0.01...", flush=True)
             acc_30_hi = verify_adam_fix(in_dim, hidden, out_dim, device, tr_ld, val_ld, test_ld,
                                          lr=0.01, n_epochs=30)
@@ -595,7 +562,6 @@ def run_task(task_name, out_dir, device, skip_adam=False):
             print(f"[Adam verify] PASSED ({acc_30:.4f}). Adam fix confirmed.", flush=True)
             adam_verified = True
 
-    # ─── Accumulate state ─────────────────────────────────────────────────
     all_results = {m: [] for m in METHODS}
 
     stage_b = {
@@ -618,7 +584,6 @@ def run_task(task_name, out_dir, device, skip_adam=False):
 
     atexit.register(flush_all)
 
-    # ─── Stage B: seeds × methods ─────────────────────────────────────────
     print("\n=== Stage B: 3 seeds × methods ===", flush=True)
 
     for method in METHODS:
@@ -636,13 +601,11 @@ def run_task(task_name, out_dir, device, skip_adam=False):
                                rho_geo=RHO, lambda_S=LS, K_geo=KG)
             all_results[method].append(result)
 
-            # Accumulate H1
             for nm, h1s in result['h1_stats'].items():
                 if nm not in h1_persist['methods'][method]:
                     h1_persist['methods'][method][nm] = []
                 h1_persist['methods'][method][nm].append({'seed': seed, **h1s})
 
-            # G4: per-epoch S stats for MF cells
             if mode_str == 'mf':
                 g4_trace['methods'][method].append({
                     'seed': seed,
@@ -670,7 +633,6 @@ def run_task(task_name, out_dir, device, skip_adam=False):
             })
             flush_all()
 
-    # ─── G3 analysis ──────────────────────────────────────────────────────
     print("\n=== G3 Analysis ===", flush=True)
     g3_results = {}
     for base_opt in ['sgd', 'adam']:
@@ -682,14 +644,12 @@ def run_task(task_name, out_dir, device, skip_adam=False):
                   f"t={g3['t_stat']:.2f} p={g3['p_val_1sided']:.3f} "
                   f"1SE={'YES' if g3['significant_1se'] else 'no'}", flush=True)
 
-    # ─── H1 summary across seeds ──────────────────────────────────────────
     h1_summary = {}
     for method in METHODS:
         h1_summary[method] = {}
         for nm, seed_list in h1_persist['methods'].get(method, {}).items():
             means = [s['mean'] for s in seed_list if s.get('mean') is not None]
             if means:
-                # One-sample t-test: cos_P > 0 across first-1/3 steps, averaged across seeds
                 t_stat, p_2s = sp_stats.ttest_1samp(means, 0.0) if len(means) > 1 else (0.0, 1.0)
                 p_1s = float(p_2s / 2 if t_stat > 0 else 1.0)
                 h1_summary[method][nm] = {
@@ -699,7 +659,6 @@ def run_task(task_name, out_dir, device, skip_adam=False):
                     'per_seed': seed_list,
                 }
 
-    # H1 max cos (MF cells only)
     all_h1_mf_means = []
     for method in ['mf-sgd', 'mf-adam']:
         if method in h1_summary:
@@ -708,7 +667,6 @@ def run_task(task_name, out_dir, device, skip_adam=False):
                 if m is not None: all_h1_mf_means.append(m)
     h1_max = max(all_h1_mf_means) if all_h1_mf_means else 0.0
 
-    # ─── G4 summary: final λ ratio per layer ──────────────────────────────
     g4_summary = {}
     for method in ['mf-sgd', 'mf-adam']:
         if method not in g4_trace['methods']: continue
@@ -730,13 +688,11 @@ def run_task(task_name, out_dir, device, skip_adam=False):
             for nm, v in final_stats.items()
         }
 
-    # λ ratio > 1 is a G4 signal
     g4_max_ratio = 0.0
     for method_stats in g4_summary.values():
         for nm, stats in method_stats.items():
             g4_max_ratio = max(g4_max_ratio, stats.get('lambda_ratio_mean', 0.0))
 
-    # ─── Verdict ──────────────────────────────────────────────────────────
     g3_sgd  = g3_results.get('sgd',  {}).get('significant_1se', False)
     g3_adam = g3_results.get('adam', {}).get('significant_1se', False)
     h1_confirm = h1_max > 0.3
@@ -768,7 +724,6 @@ def run_task(task_name, out_dir, device, skip_adam=False):
     g4_trace['verdict']      = {'g4_max_ratio': float(g4_max_ratio), 'g4_confirm': g4_confirm}
     flush_all()
 
-    # ─── REPORT.md ────────────────────────────────────────────────────────
     lines = [
         f"# {task_name.upper()} MLP — Batch 9 Report (with H1/G4 Trace)\n\n",
         f"Generated: {time.strftime('%Y-%m-%d %H:%M UTC')}\n\n",
@@ -832,7 +787,6 @@ def run_task(task_name, out_dir, device, skip_adam=False):
     return verdict
 
 
-# ─── Entry ────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', choices=['adult', 'covertype'], required=True)

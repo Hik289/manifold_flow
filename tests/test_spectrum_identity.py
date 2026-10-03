@@ -1,5 +1,3 @@
-"""Unit test #5 — Spectrum identity: σ_i^2(QS^{1/2}) = λ_i(S)."""
-
 import torch
 
 from manifoldflow.parametrization import manifold_weight
@@ -28,7 +26,6 @@ def test_spectrum_identity_random():
         eigvals, _ = fp32_eigh(S)
         sv_sorted = torch.sort(sv, descending=True).values
         ev_sorted = torch.sort(eigvals, descending=True).values
-        # fp32_eigh in spd_ops casts via float32 — relax to spec tolerance 1e-5
         err = (sv_sorted ** 2 - ev_sorted).abs().max().item()
         assert err < 1e-4, (n, r, err)
 

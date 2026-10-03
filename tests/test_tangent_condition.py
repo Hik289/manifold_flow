@@ -1,5 +1,3 @@
-"""Unit test #3 — Tangent condition: Q^T G_tan + G_tan^T Q ≈ 0."""
-
 import torch
 
 from manifoldflow.tangent import decompose_tangent_normal
@@ -23,7 +21,7 @@ def test_tangent_skew():
 
 
 def test_consistency_with_normal():
-    """G_bar = G_tan + Q P should hold exactly."""
+
     torch.manual_seed(0)
     Q = _random_stiefel(64, 8, seed=5)
     G_bar = torch.randn(64, 8, dtype=torch.float64)

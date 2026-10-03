@@ -1,6 +1,4 @@
 #!/bin/bash
-# Reproduce Mini-Transformer FFN results on WikiText-2
-# Expected output: experiments/results/transformer_wikitext/
 
 set -e
 cd "$(dirname "$0")/.."

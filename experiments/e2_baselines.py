@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""
-E2 — New baselines on Adult + Covertype (Adam lr=0.001, 3 seeds: 42, 123, 7)
-B1: W = Q @ diag(s),  s > 0 (exp parametrization)
-B2: Unconstrained dense nn.Linear  (matched param count, no Stiefel)
-B3: Spectral normalization (Miyato 2018) on each Linear
 
-Outputs per baseline per dataset:
-  experiments/comparison/baselines_v2/{B1_qdiag,B2_dense,B3_specnorm}/{adult,covertype}/results.json
-"""
 import sys, os, json, time, math, warnings, atexit, signal, traceback
 from pathlib import Path
 import numpy as np
@@ -42,9 +34,8 @@ def _qr_init(n, r, seed=None):
     Q, _ = torch.linalg.qr(A)
     return Q.float()
 
-# ─── B1: QDiag layer ───────────────────────────────────────────────────────
 class QDiagLinear(nn.Module):
-    """W = Q @ diag(exp(log_s)), Q on Stiefel (fixed, not trained via manifold step), s>0."""
+
     def __init__(self, in_dim, out_dim, seed=None):
         super().__init__()
         if out_dim <= in_dim:
@@ -53,12 +44,12 @@ class QDiagLinear(nn.Module):
             n, r = out_dim, in_dim; self.transpose = False
         self.n, self.r = n, r
         self.Q     = nn.Parameter(_qr_init(n, r, seed))
-        self.log_s = nn.Parameter(torch.zeros(r))  # exp(log_s) = 1 init
+        self.log_s = nn.Parameter(torch.zeros(r))
         self.bias  = nn.Parameter(torch.zeros(out_dim))
 
     def forward(self, x):
-        s     = torch.exp(self.log_s)          # positive scaling
-        W_base = self.Q * s.unsqueeze(0)       # broadcast: (n,r) * (r,) = (n,r)
+        s     = torch.exp(self.log_s)
+        W_base = self.Q * s.unsqueeze(0)
         W = W_base.T if self.transpose else W_base
         return F.linear(x, W, self.bias)
 
@@ -77,9 +68,8 @@ class QDiagMLP(nn.Module):
             if i < len(self.layers) - 1: x = F.relu(x)
         return x
 
-# ─── B2: Dense MLP (matched params) ────────────────────────────────────────
 class DenseMLP(nn.Module):
-    """Standard nn.Linear, same architecture (no manifold constraint)."""
+
     def __init__(self, in_dim, hidden_dim, out_dim, seed=0):
         super().__init__()
         torch.manual_seed(seed)
@@ -94,9 +84,8 @@ class DenseMLP(nn.Module):
             if i < len(self.layers) - 1: x = F.relu(x)
         return x
 
-# ─── B3: SpectralNorm MLP ───────────────────────────────────────────────────
 class SpectralNormMLP(nn.Module):
-    """nn.Linear + spectral_norm on each weight, same architecture."""
+
     def __init__(self, in_dim, hidden_dim, out_dim, seed=0):
         super().__init__()
         torch.manual_seed(seed)
@@ -113,7 +102,6 @@ class SpectralNormMLP(nn.Module):
         return x
 
 
-# ─── Data loaders ──────────────────────────────────────────────────────────
 def load_adult(seed=0):
     from sklearn.datasets import fetch_openml
     from sklearn.preprocessing import StandardScaler, LabelEncoder
