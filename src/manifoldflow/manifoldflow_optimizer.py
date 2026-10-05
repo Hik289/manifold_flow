@@ -7,7 +7,7 @@ from typing import Literal
 import torch
 from torch.optim import Optimizer
 
-from .spd_ops import sym, symlogm, affine_invariant_step, spectral_clip, fp32_eigh
+from .spd_ops import sym, symlogm, matrix_sqrt, affine_invariant_step, spectral_clip, fp32_eigh
 from .retraction import qr_retract, procrustes_align
 from .tangent import decompose_tangent_normal, project_tangent
 
@@ -28,6 +28,8 @@ class ManifoldFlowConfig:
     lambda_min: float = 0.25
     lambda_max: float = 4.0
     warmup_frac: float = 0.05
+    use_gate: bool = True
+    pressure_mode: str = "gradient"
 
 
 def _stiefel_sgd_step(Q, G_tan, state, lr, momentum):
@@ -96,6 +98,18 @@ class ManifoldFlowOptimizer(Optimizer):
     ):
         if mf_config is None:
             mf_config = ManifoldFlowConfig()
+        if mf_config.K_geo < 1:
+            raise ValueError("K_geo must be positive")
+        if not 0.0 < mf_config.lambda_min <= 1.0 <= mf_config.lambda_max:
+            raise ValueError("spectral bounds must contain the identity")
+        if not 0.0 <= mf_config.beta_P < 1.0:
+            raise ValueError("beta_P must be in [0, 1)")
+        if not 0.0 <= mf_config.warmup_frac <= 1.0:
+            raise ValueError("warmup_frac must be in [0, 1]")
+        if mf_config.rho_geo < 0.0 or mf_config.lambda_S < 0.0:
+            raise ValueError("geometry rate and regularization must be nonnegative")
+        if mf_config.pressure_mode not in {"gradient", "random"}:
+            raise ValueError("unsupported pressure mode")
         if base_optim not in {"sgd", "adam"}:
             raise ValueError(f"unsupported base optimizer: {base_optim}")
         defaults = dict(lr=lr, momentum=momentum, betas=betas,
@@ -150,6 +164,9 @@ class ManifoldFlowOptimizer(Optimizer):
                 split = decompose_tangent_normal(Q, G_bar)
                 G_tan = split.G_tan
                 P_t = split.P
+                if cfg.pressure_mode == "random":
+                    random_pressure = sym(torch.randn_like(P_t))
+                    P_t = random_pressure * (P_t.norm() / random_pressure.norm().clamp_min(eps))
 
                 if base_optim == "adam":
                     Q_new = _stiefel_adam_step(
@@ -179,23 +196,28 @@ class ManifoldFlowOptimizer(Optimizer):
                 do_geo_update = (gamma_t > 0.0) and warmup_done and ((t % cfg.K_geo) == 0)
 
                 if do_geo_update:
-                    P_norm = P_t.norm() + eps
-                    M_prev_norm = M_P_prev.norm() + eps
-                    c_t = (P_t * M_P_prev).sum() / (P_norm * M_prev_norm)
-                    G_nor_norm = (Q @ P_t).norm() + eps
+                    P_norm = P_t.norm()
+                    M_prev_norm = M_P_prev.norm()
+                    c_t = (P_t * M_P_prev).sum() / (P_norm * M_prev_norm + eps)
+                    G_nor_norm = (Q @ P_t).norm()
                     G_tan_norm = G_tan.norm() + eps
                     r_t = G_nor_norm / G_tan_norm
-                    log_r_t = torch.log(r_t)
-                    a_t_c = torch.sigmoid(torch.tensor(
-                        cfg.alpha_c * (c_t.item() - cfg.tau_c), dtype=Q.dtype, device=dev))
-                    a_t_r = torch.sigmoid(cfg.alpha_r * (log_r_t - cfg.tau_r))
-                    a_t = (a_t_c * a_t_r).item()
-                    H_t = sym(M_P_new) + cfg.lambda_S * symlogm(S)
+                    if cfg.use_gate:
+                        log_r_t = torch.log(r_t.clamp_min(eps))
+                        a_t_c = torch.sigmoid(cfg.alpha_c * (c_t - cfg.tau_c))
+                        a_t_r = torch.sigmoid(cfg.alpha_r * (log_r_t - cfg.tau_r))
+                        eigenvalues, _ = fp32_eigh(S)
+                        spectral_damping = (eigenvalues.min() / eigenvalues.max()).clamp(max=1.0)
+                        a_t = (a_t_c * a_t_r * spectral_damping).item()
+                    else:
+                        a_t = 1.0
+                    R = matrix_sqrt(S)
+                    H_t = sym(M_P_new) + cfg.lambda_S * (R @ symlogm(S) @ R)
                     S_raw = affine_invariant_step(S, H_t, gamma_t * a_t)
                     state["S"] = spectral_clip(S_raw, cfg.lambda_min, cfg.lambda_max)
 
+                state["Q_prev"] = Q.clone()
                 Q.data.copy_(Q_new)
-                state["Q_prev"] = Q_new.clone()
                 state["step"] = t + 1
 
                 if self.log_pressure:
