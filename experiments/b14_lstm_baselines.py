@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
+
 import sys, os, json, time, math, warnings, atexit, signal, traceback
 from pathlib import Path
 from collections import Counter
@@ -365,7 +374,7 @@ def run_b3(seed, device, train_data, val_data, vocab_size):
             "epoch_ppls": epoch_ppls, "elapsed": time.time() - t0}
 
 
-def main():
+def legacy_main():
     import torch
     device = torch.device("cuda:0")
     print(f"Device: {device}  ({torch.cuda.get_device_name(0)})", flush=True)
@@ -523,6 +532,16 @@ def main():
         "mf_adam_reference": {"mean": MF_ADAM_MEAN, "per_seed": MF_ADAM_PPLS},
     })
     print(f"\nAll outputs in: {OUT_BASE}", flush=True)
+
+def main():
+    if "--legacy" in sys.argv[1:]:
+        sys.argv.remove("--legacy")
+        legacy_main()
+        return
+    from experiments.b12_lstm_5seeds import current_main
+    if "--methods" not in sys.argv[1:]:
+        sys.argv[1:1] = ["--methods", "dense", "fs", "scalar", "diagonal", "mf"]
+    current_main()
 
 
 if __name__ == "__main__":

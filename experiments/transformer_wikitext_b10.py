@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
+
 import sys, os, json, time, math, warnings, atexit, signal, traceback, re
 from pathlib import Path
 from collections import Counter
@@ -735,8 +744,7 @@ def run(out_dir, device):
     print(f"\n[DONE] Outputs saved to {out_dir}", flush=True)
     return verdict
 
-
-if __name__ == '__main__':
+def legacy_main():
     def _sig(sig, frame):
         print(f"\n[SIGNAL {sig}] flushing...", flush=True); sys.exit(0)
     signal.signal(signal.SIGTERM, _sig)
@@ -756,3 +764,26 @@ if __name__ == '__main__':
         print(f"\n[ERROR] {e}", flush=True)
         traceback.print_exc()
         sys.exit(1)
+
+def main():
+    if "--legacy" in sys.argv[1:]:
+        sys.argv.remove("--legacy")
+        legacy_main()
+        return
+    from experiments.b12_lstm_5seeds import current_main
+    defaults = [
+        (("--architectures", "--architecture"), ["--architectures", "transformer"]),
+        (("--seq-len",), ["--seq-len", "128"]),
+        (("--max-epochs", "--epochs"), ["--max-epochs", "12"]),
+        (("--min-epochs",), ["--min-epochs", "1"]),
+        (("--patience",), ["--patience", "12"]),
+        (("--seeds",), ["--seeds", "42", "123", "2024"]),
+    ]
+    for flags, values in defaults:
+        if not any(argument.split("=", 1)[0] in flags for argument in sys.argv[1:]):
+            sys.argv.extend(values)
+    current_main()
+
+
+if __name__ == "__main__":
+    main()
