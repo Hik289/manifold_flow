@@ -1,11 +1,12 @@
-# ManifoldFlow: SPD-Relaxed Stiefel Layers with Learnable Singular Spectrum
-
-[![arXiv](https://img.shields.io/badge/arXiv-2607.04535-b31b1b.svg)](https://arxiv.org/abs/2607.04535)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB.svg)](pyproject.toml)
-
-Official code for **ManifoldFlow**, a spectrum-learnable relaxation of
-Fixed-Stiefel neural layers.
+<div align="center">
+  <h1>ManifoldFlow: Spectrum-Learnable Stiefel Optimization via SPD Relaxation</h1>
+  <p>
+    <a href="https://arxiv.org/abs/2607.04535"><img alt="arXiv paper" src="https://img.shields.io/badge/arXiv-2607.04535-b31b1b.svg"></a>
+    <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/License-MIT-green.svg"></a>
+    <a href="pyproject.toml"><img alt="Python 3.9+" src="https://img.shields.io/badge/Python-3.9%2B-3776AB.svg"></a>
+  </p>
+  <p>Official code for a Stiefel–SPD optimizer that learns a bounded singular spectrum while preserving an orthonormal basis.</p>
+</div>
 
 > Fixed Stiefel learns an orthonormal basis but fixes every represented
 > singular value at one. ManifoldFlow keeps the basis and learns bounded
